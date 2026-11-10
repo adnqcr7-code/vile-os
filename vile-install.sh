@@ -103,6 +103,9 @@ else
 fi
 
 echo "== 5/5 ScreenFit =="
+# NOTE: files pushed to GitHub via the API lose their executable bit, so
+# make the scripts executable here instead of assuming the clone has them.
+chmod +x "$REPO_DIR/screenfit/install.sh" "$REPO_DIR/archiso/build-iso.sh"
 (cd "$REPO_DIR/screenfit" && ./install.sh)
 # Make sure the compositor can find it on PATH even if ~/.local/bin is not.
 sudo ln -sf "$HOME/.local/bin/screenfit" /usr/local/bin/screenfit

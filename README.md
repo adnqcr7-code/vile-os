@@ -15,7 +15,7 @@ visually tested before the next one started.
 ```sh
 git clone https://github.com/adnqcr7-code/vile-os.git ~/vile-os
 cd ~/vile-os
-./vile-install.sh
+bash vile-install.sh
 ```
 
 The script installs the Arch packages, builds wlroots 0.19.3 from source
@@ -40,7 +40,7 @@ On an Arch machine with `archiso` installed:
 
 ```sh
 cd archiso
-sudo ./build-iso.sh
+sudo bash ./build-iso.sh
 ```
 
 Writes the ISO to `/tmp/vile-iso-out/`. Write it to USB
