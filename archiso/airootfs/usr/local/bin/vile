@@ -1,0 +1,33 @@
+#!/bin/bash
+# Vile OS launcher — builds the compositor on first run, then starts it.
+# Run from the live ISO's root prompt (tty1):  vile
+#   Windows key+Enter = new terminal   Windows key+Q = close
+#   Windows key+J/K = move focus       Windows key+F = fullscreen
+#   Windows key+Escape = clear focus   Windows key+L = lock (needs a password:
+#   run `passwd` first — the live ISO's root account has no password set,
+#   and PAM will not unlock with an empty one)
+set -e
+# wlroots 0.19.3 is built from source into /usr/local (Arch dropped the
+# unversioned `wlroots` package). Arch's pkgconf does NOT search
+# /usr/local/lib/pkgconfig by default, and /usr/local/lib is not in the
+# default ld path — both need to be set here or the build/run fails.
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+ldconfig 2>/dev/null || true
+# The `foot` package ships its own /usr/share/applications/foot.desktop, so
+# the Vile one (Vile icon) cannot live in airootfs at that path — pacstrap
+# would fail on the file conflict. Install it over the stock one here
+# instead (live rootfs is a writable overlay, this is idempotent).
+if [ -f /root/vile-os/assets/foot.desktop ]; then
+  cp /root/vile-os/assets/foot.desktop /usr/share/applications/foot.desktop 2>/dev/null || true
+  cp /root/vile-os/assets/foot-logo*.png /usr/share/icons/vile/ 2>/dev/null || true
+fi
+cd /root/vile-os/compositor
+if [ ! -x build/vile ]; then
+  echo "Vile: first run — building the compositor (about a minute)..."
+  meson setup build >/tmp/vile-build.log 2>&1
+  ninja -C build >>/tmp/vile-build.log 2>&1
+  echo "Vile: build done."
+fi
+echo "Vile: starting — bottom bar, dock, wallpaper."
+exec ./build/vile "$@"

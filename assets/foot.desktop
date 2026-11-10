@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=foot
+Comment=Vile OS terminal
+Exec=foot
+Icon=/usr/share/icons/vile/foot-logo.png
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;
+StartupWMClass=foot

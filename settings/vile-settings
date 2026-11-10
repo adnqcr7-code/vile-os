@@ -1,0 +1,5 @@
+#!/bin/sh
+# Vile Settings launcher — run from anywhere, e.g. from the desktop.
+# On Arch: gtk3 + python-gobject + python-pillow must be installed:
+#   sudo pacman -S gtk3 python-gobject python-pillow
+exec python3 "$(dirname "$0")/vile-settings.py" "$@"

@@ -1,0 +1,18 @@
+#!/bin/sh
+# ScreenFit launcher.
+# Finds screenfit.py next to this script, or in the standard
+# install locations, and runs it with python3. No root needed.
+DIR="$(dirname "$(readlink -f "$0")")"
+
+if [ -f "$DIR/screenfit.py" ]; then
+    exec python3 "$DIR/screenfit.py" "$@"
+fi
+
+for d in /usr/share/screenfit "$HOME/.local/share/screenfit"; do
+    if [ -f "$d/screenfit.py" ]; then
+        exec python3 "$d/screenfit.py" "$@"
+    fi
+done
+
+echo "ScreenFit: screenfit.py not found." >&2
+exit 1

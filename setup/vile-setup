@@ -1,0 +1,7 @@
+#!/bin/sh
+# Vile Setup launcher — first-run wizard (GTK3, Wayland native).
+# Spawned by the compositor on first boot (no ~/.config/vile/setup-done
+# marker), and from Settings ("Run Setup again").
+# On Arch, gtk3 + python-gobject + python-pillow must be installed:
+#   sudo pacman -S gtk3 python-gobject python-pillow
+exec python3 "$(dirname "$0")/vile-setup.py" "$@"

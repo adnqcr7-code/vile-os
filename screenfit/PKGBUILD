@@ -1,0 +1,31 @@
+# Maintainer: Adnan <adnan@example.com>
+# ScreenFit - a simple display settings GUI for Linux.
+# Community clone of the Intel Graphics Command Center display page.
+# Not affiliated with Intel.
+pkgname=screenfit
+pkgver=0.4.0
+pkgrel=1
+pkgdesc="ScreenFit - simple display settings GUI for Linux, resolution and overscan (fit to screen) fix"
+arch=('any')
+url="https://example.com/screenfit"
+license=('MIT')
+depends=('python' 'python-gobject' 'python-cairo' 'gtk3' 'xorg-xrandr')
+conflicts=('display-center')
+replaces=('display-center')
+# Local build: the sources live in src/ next to this PKGBUILD.
+# Run `makepkg -si` from the repo root.
+source=()
+sha256sums=()
+
+package() {
+    install -Dm755 "$startdir/src/screenfit.py" \
+        "$pkgdir/usr/share/screenfit/screenfit.py"
+    install -Dm644 "$startdir/src/xrandr.py" \
+        "$pkgdir/usr/share/screenfit/xrandr.py"
+    install -Dm755 "$startdir/src/screenfit" \
+        "$pkgdir/usr/bin/screenfit"
+    install -Dm644 "$startdir/src/screenfit.desktop" \
+        "$pkgdir/usr/share/applications/screenfit.desktop"
+    install -Dm644 "$startdir/LICENSE" \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

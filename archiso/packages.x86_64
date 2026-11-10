@@ -1,0 +1,118 @@
+# Vile OS archiso packages — v2 plan (Nov 10, 2026)
+#
+# Pure Arch, kernel-first. The ISO starts from Arch's own packages only:
+#   linux (the kernel) + base + systemd + pacman — NO prebuilt Arch system
+#   (no EndeavourOS, CachyOS, Garuda, or any other Arch-based distro).
+#
+# The desktop is the VILE COMPOSITOR (compositor/, our own # compositor, built from source) — NOT the hyprland package. The old v1
+# list (hyprland, hyprpaper, hyprlock, hypridle, waybar, eww, wofi,
+# nwg-dock-hyprland) is kept below under HOLD: those pieces only come back
+# if a later compositor piece needs them, and waybar/eww/dock are NOT
+# tested as if Hyprland were the compositor.
+#
+# STATUS: wlroots 0.19.3 is built from source (Arch dropped the unversioned
+# `wlroots` package Nov 2026 — only wlroots0.20 remains, and the compositor
+# needs the 0.19 API). See build-env/wlroots-0.19.3.tar.gz + the staged
+# files under archiso/airootfs/usr/local/. NOT yet used to build an ISO.
+# Piece 1 (compositor + wallpaper) is proven headless on Ubuntu; the ISO
+# build + QEMU boot test is Piece 6. Do not present this as working
+# until mkarchiso has actually run and the ISO has booted.
+
+# --- Piece 0: kernel + base (the foundation, nothing else first) --------
+linux
+linux-firmware
+intel-ucode
+amd-ucode
+base
+base-devel
+systemd
+systemd-sysvcompat
+pacman
+archiso
+mkinitcpio
+mkinitcpio-archiso
+mkinitcpio-nfs-utils
+nbd
+grub
+syslinux
+memtest86+
+efibootmgr
+networkmanager
+iwd
+openssh
+sudo
+vim
+nano
+git
+curl
+unzip
+
+# --- Vile compositor: runtime deps (wlroots stack, from Arch repos) -----
+# NOTE: wlroots itself is NOT in this list — Arch removed the `wlroots`
+# package; the compositor needs 0.19.3, built from source and shipped in
+# airootfs/usr/local/ (lib + headers + wlroots-0.19.pc). Its runtime deps
+# below ARE Arch packages.
+wayland
+wayland-protocols
+libdrm
+libdisplay-info
+pixman
+libinput
+libxkbcommon
+seatd
+mesa
+vulkan-icd-loader
+xkeyboard-config
+
+# --- Vile compositor: build deps (compositor/ is built from source) -----
+meson
+ninja
+gcc
+pkg-config
+
+# --- Test tools (screenshot proof + a terminal for Piece 2) --------------
+foot
+grim
+slurp
+wl-clipboard
+
+# --- Fonts + theme (Vile look: Inter + JetBrains Mono, purple dark) ------
+noto-fonts
+pango
+cairo
+noto-fonts-emoji
+inter-font
+ttf-jetbrains-mono
+adw-gtk-theme
+gtk3
+python
+python-gobject
+python-cairo
+# Vile Settings: PIL crops/resizes the profile picture
+python-pillow
+
+# --- Audio / media (needed by later pieces, harmless now) ----------------
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+polkit
+polkit-gnome
+brightnessctl
+playerctl
+thunar
+thunar-archive-plugin
+xorg-xrandr
+
+# --- HOLD (v1 Hyprland-based stack — NOT the compositor, do not install
+# --- as the desktop. Kept here so the decision is on the record.) --------
+# hyprland
+# hyprpaper
+# hyprlock
+# hypridle
+# waybar
+# eww
+# wofi
+# nwg-dock-hyprland
+# mpvpaper
+# sddm

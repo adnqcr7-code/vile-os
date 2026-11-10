@@ -1,0 +1,11 @@
+# PAM service for the Vile lock screen.
+#
+# Install on the target machine (Arch or the test VM) as /etc/pam.d/vile:
+#   sudo cp pam.d/vile /etc/pam.d/vile
+#
+# The lock screen checks the typed password against the real system
+# password of the user running the compositor (pam_unix). There is no
+# hardcoded password anywhere in Vile — if this file is missing, PAM
+# refuses and the screen stays locked.
+auth required pam_unix.so
+account required pam_unix.so

@@ -1,0 +1,14 @@
+# build/, __pycache__/, and local test artefacts
+build/
+__pycache__/
+*.pyc
+*.pyo
+# built ISOs and ISO work dirs
+*.iso
+/tmp/vile-iso-work/
+/tmp/vile-iso-out/
+# Muse snapshot-sync metadata (agent-owned, never committed)
+*.muse-github-snapshot-sync.json
+*.muse-github-snapshot-sync.json.tmp-*
+# local test runtime dirs
+/tmp/vile-*
