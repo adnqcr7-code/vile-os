@@ -69,7 +69,7 @@ if [ ! -d "$WLROOTS_SRC" ]; then
 fi
 # Build deps for wlroots on the BUILD machine (Arch).
 pacman -Sy --needed --noconfirm base-devel meson ninja pkgconf wayland \
-  wayland-protocols libinput libxkbcommon pixman libseat libdrm mesa \
+  wayland-protocols libinput libxkbcommon pixman seatd libdrm mesa \
   libdisplay-info >>"$BUILD_LOG" 2>&1
 cd "$WLROOTS_SRC"
 meson setup build --prefix=/usr/local -Dexamples=false -Drenderers=gles2 \

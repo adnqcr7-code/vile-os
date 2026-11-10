@@ -94,7 +94,7 @@ Needs wlroots 0.19, wayland-server ≥ 1.23, pixman ≥ 0.43, libdrm.
 **On Arch (Adnan's laptop):**
 
 ```
-sudo pacman -S --needed wlroots wayland wayland-protocols meson ninja gcc pkg-config libdrm pixman libinput libxkbcommon libseat foot grim
+sudo pacman -S --needed wlroots wayland wayland-protocols meson ninja gcc pkg-config libdrm pixman libinput libxkbcommon seatd foot grim
 cd ~/vile-os/compositor
 meson setup build
 ninja -C build

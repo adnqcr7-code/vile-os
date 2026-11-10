@@ -36,7 +36,7 @@ export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 echo "== 1/5 Arch packages =="
 sudo pacman -Syu --needed --noconfirm \
   base-devel meson ninja pkgconf git curl \
-  wayland wayland-protocols libinput libxkbcommon pixman libseat libdrm mesa \
+  wayland wayland-protocols libinput libxkbcommon pixman seatd libdrm mesa \
   libdisplay-info xorg-xrandr \
   gtk3 python-gobject python-pillow python-cairo foot xdg-utils
 
