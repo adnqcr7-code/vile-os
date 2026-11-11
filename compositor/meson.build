@@ -1,5 +1,5 @@
 project('vile-compositor', 'c',
-  version: '0.5.3',
+  version: '0.5.6',
   license: 'MIT',
   meson_version: '>=1.3',
   default_options: ['c_std=c11', 'warning_level=2'])

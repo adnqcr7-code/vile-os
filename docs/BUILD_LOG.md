@@ -6473,3 +6473,3663 @@ Produced by: iso6 QEMU boot test (0.5.3, Nov 10 2026 ~19:21 EST) + 0.5.3 rebuild
 _248 files. This table is the single source of truth for
 screenshot shas — older per-section values in this log are
 history and may not match disk._
+
+## Light/dark theme (0.5.4) — DONE Nov 10, 2026 ~20:25 EST (verified by eye)
+
+Adnan's requirement (Nov 10, 2026 ~13:11 EST): "add a light them and dark
+theme that should be asked when the user try installin it and they can
+change it from settings". Built after the 0.5.3 ISO was proven; main.c was
+free. Versions bumped to 0.5.4 in source only (NOT the archiso copy — that
+syncs at ISO rebuild time). ISO NOT rebuilt — separate step.
+
+### Theme setting
+
+Plain-text file `~/.config/vile/theme` containing "dark" or "light",
+default dark when missing. The compositor reads it at startup AND watches
+its mtime on the same 1s timer as the wallpaper hook, so switching applies
+live without a restart; `VILE_THEME=light|dark` env override wins and
+disables the file watcher. Settings re-reads on its 1s tick, Files on its
+1s device poll, wizard reads at startup + writes on its Theme step.
+
+### Compositor (`compositor/src/main.c`, now 0.5.4)
+
+One palette struct `struct vile_palette` for the whole shell — bottom bar,
+dock pill, system menu, lock screen (clock/date/user card/password field),
+window borders, clock text, letterbox bg. DARK = the exact 0.5.3 tokens
+(#0F0B1A bg, #6D4AFF accent, light text) — dark renders pixel-identical to
+0.5.3 (live flip dark == dark desktop, same sha). LIGHT = light
+lavender-white bg (#F2F0FA surfaces, white cards #FFFFFF), dark text
+(#1A1626, secondary #6B6580), SAME purple accent #6D4AFF, frosted light
+bar, light dock pill. Accent #6D4AFF and error red stay bare literals
+(same in both themes). Dark tiles (dock icon tiles #171228, ScreenFit
+tile, foot ">_" fallback, avatar ring, toggle knob, V fallbacks) stay dark
+in both themes — app-icon look. Rewire done by scripted exact-count
+replacements (all assertions passed; 58 `P->` + 12 `pal->` uses).
+Functions: `vile_pal(bool light)`, `vile_theme_path` / `vile_read_theme` /
+`vile_apply_theme` (palette flag + letterbox bg + logo reload + lock-bg
+reload + lock re-render + bar/dock/menu re-render + borders + frame
+schedule), `vile_paint_lock_bg` (theme-aware blur file),
+`vile_lock_reload_bg`, `vile_reload_logo` (destroys node+buffer, reloads,
+re-raises windows/shell/lock above it so the logo stays under windows).
+`vile_reload_wallpaper` also calls `vile_reload_logo` so a live wallpaper
+switch updates the overlay too.
+
+### Light assets (`assets/make-light-theme-assets.py`)
+
+`assets/arch-logo-dark.png` (sha `f0154dec…`, logo pixels blended 65%
+toward #6D4AFF, reads cleanly on #F2F0FA, no halo) and
+`wallpapers/vile-purple-arch-blur-light.jpg` (sha `63b41b88…`, blur
+blended 55% toward white, mean ~(153,152,158)).
+
+### Settings (`settings/vile-settings.py`, VERSION stays 0.3.0 — app version)
+
+CSS split into `CSS_DARK` (unchanged) + `CSS_LIGHT` (window #F2F0FA/text
+#1A1626, headerbar #E4E0F2, frame/entry/treeview #FFFFFF, muted #6B6580,
+secondary buttons #E4E0F2, borders #DDD8F0; gauge colours stay, card
+backgrounds go light) + `theme_css(light)` + compat alias `CSS = CSS_DARK`
+(wizard imports it). Helpers `theme_path()` / `read_theme()` /
+`write_theme()` / `theme_preview_pixbuf(light)` (96×60 mini-desktop).
+Theme section added after Profile Picture (now SECTION 2; Wallpaper 3,
+System 4, About 5) with two choice rows (Dark/Light + preview + "✓
+Current" tag); clicking writes the theme file and restyles the window
+live via the kept `Gtk.CssProvider`. The 1s tick also watches the theme
+file mtime and restyles + moves the tag if changed elsewhere. `main()`
+sets `gtk-application-prefer-dark-theme` to `not read_theme()`. About line:
+"Compositor v0.5.4 • wlroots 0.19.3 • Wayland". System monitor 0.3.0
+follows the theme through the existing CSS classes — gauge colours stay,
+card backgrounds go light (verified in the light Settings shot).
+
+### Setup wizard (`setup/vile-setup.py`, VERSION 0.5.4, marker `vile-setup 0.5.4`)
+
+Theme step added after Wallpaper — STEPS now 7: ["Welcome", "You",
+"Wallpaper", "Theme", "Apps", "Timezone", "Done"]; indices updated
+everywhere. `_build_theme()` + `_refresh_theme_selection()` +
+`on_theme_clicked(light)`: two big choice cards (Dark/Light) with
+previews, default = current theme (dark on first install); clicking writes
+the theme file immediately AND restyles the wizard itself live. Summary
+gains "Theme: Light/Dark" line. Skip does not write the theme (missing
+file = dark default). Wizard imports `read_theme`/`write_theme`/
+`theme_css`/`theme_preview_pixbuf` from Settings (shared code, never
+copied).
+
+### Files (`filemanager/vile-files.py`, VERSION stays 1.2.0)
+
+CSS split into `CSS_DARK` + `CSS_LIGHT` (same token mapping, plus
+separator/dialog/menu/menuitem/drive-row/progressbar rules) + `theme_css()`
++ local `read_theme()` (standalone, no Settings import) + `_theme_path()`.
+`__init__` keeps `self._css` provider + `self._last_theme_mtime`;
+`_poll_devices` 1s poll reloads CSS live on theme-file change. `main()`
+prefer-dark follows the theme file. Zip code and System monitor data code
+untouched, per task.
+
+### Versions bumped to 0.5.4 (source tree only)
+
+`compositor/vile-foot.sh` banner "VILE OS · v0.5.4",
+`compositor/meson.build` version '0.5.4', Settings About, wizard VERSION +
+marker. `main.c:239` comment still references 0.5.3 as the dark baseline —
+intentional, keep. Build-dir meson logs still say 0.5.3 (regenerate on
+next configure).
+
+### Bugs found and fixed in this session
+
+1. **Toolchain wiped a 4th time** (Nov 10, 2026 ~19:30 EST): `/usr/local`
+   empty again when the first theme build ran (`wayland-scanner` missing).
+   Rebuilt from `toolchain-src/` existing build dirs (wayland 1.24.0,
+   pixman 0.46.4, wlroots 0.19.3, `ninja -j4` + `ninja install`,
+   `ldconfig`) — verified `pkg-config --modversion` = 0.19.3 / 1.24.0 /
+   0.46.4. meson/ninja, grim, wtype, foot, python3-gi all survived.
+   Recreated test user `viletest` (password `vile`) and `/etc/pam.d/vile`.
+2. **`vile_pal` incomplete-type error:** forward-declaring `struct
+   vile_server` is not enough to dereference `s->theme_light`. Fixed by
+   changing the accessor to take `bool light`.
+3. **Double-logo in light mode (found by eye, ~19:36 EST):** the first
+   light smoke shot showed a saturated purple triangle floating inside
+   the wallpaper's own Arch logo — the dark overlay variant clashed with
+   the wallpaper logo. Decision: **skip the overlay entirely when the
+   current wallpaper is the Arch wallpaper** (its own logo IS the logo);
+   draw the light overlay only for wallpapers without a logo (nebula,
+   dunes). All three shipped wallpapers are dark, so the light variant
+   reads on all of them; the dark variant is never needed and is kept in
+   assets unused for a future light wallpaper. `arch-logo-dark.png`
+   stays in the tree, documented as unused.
+4. **Overlay-skip ordering bug (found ~19:43 EST):** the skip never fired
+   at first because `main()` set `server.wallpaper_current` AFTER calling
+   `vile_load_logo()` (`vile_load_wallpaper()` itself does not set it —
+   only `vile_reload_wallpaper()` does). Fixed by moving the
+   `snprintf(server.wallpaper_current, …)` in `main()` to immediately
+   after `vile_load_wallpaper()` succeeds and before `vile_load_logo()`.
+   Verified: log says "Arch wallpaper has its own logo — overlay
+   skipped"; dark desktop vs wallpaper mean max-channel diff 0.01.
+5. **Light lock background pure white (found ~19:45 EST, FIXED ~20:05
+   EST):** `vile-theme-04-light-lock.png` showed (255,255,255) instead of
+   the lightened blur (~153 + 0.30 white dim = ~183). Root cause, found
+   by elimination (red-buffer test, buffer readback proving the pixels
+   were correct, scene-tree dump proving the node was correct, dim-off
+   test proving the bg node rendered fine): **the lock dim rect colour
+   (1,1,1,0.30) is invalid as a premultiplied colour.** wlroots renders
+   scene rects as premultiplied on BOTH pixman and GLES2 (verified in
+   `render/pixman/pass.c` `render_pass_add_rect` and
+   `render/gles2/pass.c` — neither premultiplies; the colour goes
+   straight to pixman / `glUniform4f` with premultiplied blending), so
+   channels > alpha composite as opaque white. The dark dim
+   (0.04,0.03,0.07,0.30) is valid premultiplied, which is why dark
+   always worked. Fix: light palette `.dim_rgb` is now
+   (0.30,0.30,0.30) — the true 30% white wash, premultiplied — with a
+   comment in the palette; the anim tick now premultiplies the dim rgb
+   by `lock_op` (both sites) so the fade stays valid; `vile_anim_lock_in`
+   sets dim0 to (0,0,0,0). Dark dim values untouched — the settled dark
+   lock is pixel-identical by construction (rgb = dim_rgb at lock_op=1).
+   The harness check was tightened from `>120` to a BAND (120–200) — the
+   old check PASSED the white bug (mean 255). After the fix the light
+   lock bg measures mean 182, (181,181,184) at (100,100).
+6. **Missing `.bg` in the light palette (found during the same hunt):**
+   `VILE_PALETTE_LIGHT` had no `.bg` entry, so the letterbox bg_rect was
+   black (0,0,0) in light mode. Added `.bg = {0.949, 0.941, 0.980}`
+   (#F2F0FA). Invisible while the wallpaper covers the screen, but
+   wrong — fixed.
+
+### Proof (all shots under `~/workspace/vile-os/screenshots/`, read by eye)
+
+`run-theme-test.sh` — **12/12 pixel checks PASS** (bar dark mean 31 /
+light 158; dock dark 19 / light 193; wallpaper identical dark/light
+(43,45,58); live flip to dark matches dark bar exactly (31=31); live flip
+back matches light (158=158); light menu card mean 241; light lock bg in
+band 120–200 (mean=182); Settings headerbar dark 41 / light 231;
+1280×800 size + light bar 158). Live flips are pixel-exact:
+`vile-theme-01-dark.png` == `vile-theme-02b-live-dark.png` (sha
+`f1b42160…`), `vile-theme-02-light.png` ==
+`vile-theme-02c-live-light.png` (sha `d1931d50…`).
+
+- (a) `vile-theme-01-dark.png` sha `f1b42160…` — dark bare desktop,
+  single clean Arch logo, dark bar/dock, correct; matches 0.5.3.
+- (b) `vile-theme-02-light.png` sha `d1931d50…` — light bar (frosted)
+  + light dock pill with dark tiles, dark clock text, same wallpaper.
+- (c) `vile-theme-03-light-menu.png` sha `ae0e8cd0…` — light foot tiled
+  (banner v0.5.4, known test-env foot 1.16.2 red `[colors-dark]` error
+  line — NOT a shipped bug) + white system menu, dark text.
+- (d) `vile-theme-04-light-lock.png` sha `610d86df…` (re-taken after
+  the fix) — light grey blurred wallpaper with the purple Arch glow,
+  dark clock 20:07, dark "viletest", purple V avatar, white password
+  field with purple border, grey hints, gear bottom-right. Correct.
+- (e) Wizard Theme step: `vile-setup-06b-theme.png` sha `25d5ee18…`
+  (wizard dark, "Dark or light?", Dark "✓ Current", Light below);
+  `vile-setup-06c-theme-light.png` sha `7e7e8cd5…` (Light clicked —
+  the wizard itself restyled LIGHT, Light "✓ Current", desktop
+  bar/dock behind it flipped to light too). `vile-setup-09-done.png`
+  sha `ae02b4ee…` — summary shows "Theme: Light". Files written in
+  temp HOME verified: `.config/vile/theme` = "light", display-name
+  Adnan, wallpaper hook nebula, timezone America/Toronto, profile.png
+  +.face 256×256. `vile-setup-13-lock.png` sha `eb6894ae…` — light
+  lock with "Adnan" + the teal AD test avatar. Second boot proven bare
+  desktop with no wizard (`vile-setup-15-second-boot.png`).
+- (f) Settings theme switch live dark→light (same session):
+  `vile-theme-06-settings-dark.png` sha `0acd7561…` (dark Settings,
+  Theme section, Dark "✓ Current") vs
+  `vile-theme-07-settings-light.png` sha `f7c56ee5…` (same window now
+  light, Light "✓ Current", foot stays dark — terminals keep their own
+  colours, expected).
+- (g) `vile-theme-08-light-1280x800.png` sha `79d61528…` — light bar
+  + light dock pill centred at 1280×800, no overlap.
+- Dark regression: `vile-lock-01.png` sha `3d0b4b57…` (re-taken 20:15;
+  sha differs from the pre-fix `1ad6243a…` only because the clock shows
+  a different time — bg pixel (26,23,39) = dark blur + dark dim,
+  unchanged) and `vile-look-01.png` sha `133f5812…` — dark bare desktop
+  matches 0.5.3.
+
+### Harnesses (all exit 0)
+
+`run-theme-test.sh` 12/12, `run-setup-test.sh` (full, 2 runs),
+`run-look-test.sh`, `run-input-test.sh`, `run-lock-test.sh`,
+`run-settings-test.sh`, `run-files-test.sh`, `run-anim-test.sh` — all
+exit 0, 0 FAILs. Test avatar `/tmp/vile-test-avatar.jpg` had been wiped
+with /tmp; recreated (400×300, teal + orange rim + "AD", PIL) — it is a
+/tmp fixture, not a workspace file.
+
+### Source shas (this build)
+
+main.c `73e7a4f4…`, vile-settings.py `3d529f48…`, vile-setup.py
+`9219ceb2…`, vile-files.py `f960a35b…`, binary `1830eaa7…`.
+Real HOME verified clean after theme work (`~/.config/vile/` empty, no
+`~/.face` — shipped state = default purple V). All temp debug code
+removed from main.c (grep for VILE_DEBUG/DEBUG lock = 0 matches).
+
+### Unproven (Dell run is the real proof)
+
+- Light theme on a real display (headless proof only here; the Dell uses
+  GLES2, not pixman — the dim fix is correct on both renderers by the
+  premultiplied-colour argument above, but the real display is still the
+  gate).
+- Wizard's real Arch installs (no pacman in this VM; only the dry-run
+  command log is proven). Theme choice step is new — verify it on the
+  Dell.
+- First-session dock/bar clicks dead in QEMU (open bug, reproduced
+  twice) — unchanged by the theme work.
+- ScreenFit's window is light-themed and was NOT rethemed here (it is in
+  the post-theme fix queue per the Nov 10 ~15:24 Dell note, along with
+  window drag/resize and minimize/maximize).
+
+================================================================
+POST-THEME FIX QUEUE + NOV 10 ~16:31 NEW BATCH — Nov 10, 2026
+(0.5.4; no ISO rebuild, no 0.5.5 bump, task manager still LAST)
+================================================================
+
+TOOLCHAIN WIPE #4 + REBUILD (~21:00-21:13 EST)
+- Found on session start: /usr/local wiped AGAIN (Wayland/wlroots gone,
+  /usr/share/wayland-protocols gone), viletest user gone, /etc/pam.d/vile
+  gone, foot/grim/wtype/qemu/python3-gi all gone. Fourth wipe.
+- apt-get update stalled ~9 min on first attempt (http/https methods idle
+  at 0% CPU) though direct curl to archive.ubuntu.com returned 200 in
+  <1s. Killed, retried verbosely — it was progressing, just very slow;
+  completed on the second run (~4.5 min).
+- Apt replay installed: build-essential pkg-config foot grim wtype
+  python3-gi gir1.2-gtk-3.0 libdrm-dev libgbm-dev libinput-dev
+  libseat-dev libdisplay-info-dev libegl-dev libgles-dev libpam0g-dev
+  wayland-protocols qemu-system-x86 libxkbcommon-dev libffi-dev
+  libexpat1-dev libudev-dev libgl-dev + hwdata + libxml2-dev (Wayland
+  1.24.0 meson setup fails without libxml2-dev) + python3-cairo +
+  python3-gi-cairo (see ScreenFit lesson below).
+- Rebuilt from ~/workspace/vile-os/toolchain-src/: Wayland 1.24.0
+  (-Ddocumentation=false -Dtests=false), pixman 0.46.4, wlroots 0.19.3
+  (--prefix=/usr/local -Dxwayland=disabled -Dexamples=false
+  -Drenderers=gles2, 343 targets). pkg-config wlroots-0.19 = 0.19.3.
+  Install commands used sudo -n env HOME=/home/hatch
+  PATH=/home/hatch/.local/bin:/usr/local/bin:/usr/bin:/bin.
+- Recreated: user viletest (uid 1000, password 'vile' via chpasswd) +
+  /etc/pam.d/vile (copied from compositor/pam.d/vile).
+- LESSON for the next wipe: the apt replay list MUST include
+  python3-gi-cairo AND python3-cairo AND libxml2-dev AND hwdata.
+- NOTE: a later compile failure this session was a wrong
+  PKG_CONFIG_PATH in a manual command, NOT another wipe — the .pc
+  files live in /usr/local/lib/x86_64-linux-gnu/pkgconfig, which is
+  what the harnesses use.
+
+1. INTERACTIVE MOVE / RESIZE (compositor/src/main.c)
+- New per-toplevel state: floating, minimized, maximized,
+  max_was_floating, float_x/y/w/h, max_prev_x/y/w/h. New listeners
+  request_minimize / request_move / request_resize (registered in
+  vile_server_new_xdg_toplevel, removed in vile_toplevel_destroy).
+- New server grab state: grab_mode (0=none/1=move/2=resize),
+  grab_toplevel, grab_cursor_x/y, grab_start_x/y/w/h, grab_edges.
+- Helpers: vile_grab_begin_move (tiled -> floating at current tile rect,
+  re-tiles the rest; dragging a maximized window unmaximizes first and
+  re-anchors centred on the cursor; cancels the open animation so the
+  tick can't fight the drag), vile_grab_begin_resize, vile_grab_update
+  (live: move clamps x to [-(w-80), out_w-80], y to [0, out_h-36];
+  resize min 200x120, clamped inside the output), vile_grab_end,
+  vile_toplevel_place (node position + border + set_size, keeps tile_*
+  in sync).
+- vile_tile() rewritten: counts only tileable windows
+  (vile_tileable_count() — not minimized/floating/maximized); minimized
+  windows have node+border disabled and take no tile slot; maximized
+  windows fill the work-area rect (same as single-window tile rect
+  1896x924 at (12,12), so the dock stays usable); floating windows stay
+  at their float rect. vile_update_borders guarded so
+  minimized/maximized borders stay hidden. vile_toplevel_commit initial
+  size now uses vile_tileable_count. vile_toplevel_unmap clears a stale
+  grab. vile_process_cursor_motion intercepts motion while a grab is
+  active. vile_cursor_button: release ends the grab; press handles
+  Super+left-drag (move anywhere on a window) and Super+right-drag
+  (resize from the nearest corner, edges from cursor quadrant),
+  title-bar drag (top 36px, VILE_TITLE_H), and edge/corner drag on
+  floating windows (8px, VILE_EDGE_PX). linux/input-event-codes.h was
+  already included (line 132), so BTN_LEFT/BTN_RIGHT work.
+- Compile fix: VILE_TITLE_H / VILE_EDGE_PX were defined after their
+  first use — moved up next to VILE_BAR_H / VILE_DOCK_H.
+- Grab-end logging (added ~21:00 EST): vile_grab_end logs
+  "Vile: grab move|resize end '<title>' at X,Y WxH" with the final float
+  rect — the authoritative rect, because vile_tile does not run mid-drag
+  so the tiling log lines go stale.
+
+2. MINIMIZE / MAXIMIZE (compositor/src/main.c)
+- vile_minimize (hides node+border, re-tiles rest, moves focus to the
+  most recent other visible window or clears it; exits fullscreen
+  first), vile_unminimize, vile_maximize (saves prev rect +
+  max_was_floating, wlr_xdg_toplevel_set_maximized(true), re-tiles,
+  focuses), vile_unmaximize (restores float rect if it was floating,
+  else back to tiling).
+- vile_toplevel_request_maximize replaced the old stub (which only
+  scheduled a configure) with real maximize/unmaximize from
+  requested.maximized. New vile_toplevel_request_minimize (from
+  requested.minimized; minimized is not a configure state, so the ack
+  is a plain wlr_xdg_surface_schedule_configure). New
+  vile_toplevel_request_move / request_resize handlers (client-initiated
+  title-bar/edge drags from foot/GTK).
+- vile_focus_toplevel unminimizes a minimized window on focus (dock
+  click and Super+J/K are the restore paths). vile_toggle_fullscreen
+  (Super+F): if the focused window is maximized, it unmaximizes and
+  returns instead of going fullscreen.
+
+3. CLICK-VS-DRAG FIX (~21:05-21:18 EST) — root cause of the run-3
+   drag-harness failures
+- Root cause: a title-bar PRESS started a move grab immediately, so
+  clicking a CSD button on a MAXIMIZED window unmaximized + re-anchored
+  it (to 1276,9) and stole the click (press on button, release elsewhere
+  -> foot saw no click). The old comment claimed a plain click "moves
+  nothing" — true for floating windows, false for maximized ones.
+- Fix (standard click-vs-drag disambiguation): pending grab armed on
+  press, fired only after the pointer moves past a 4px threshold
+  (VILE_DRAG_THRESHOLD).
+  - New server fields: pending_grab_mode (0/1/2), pending_grab_toplevel,
+    pending_grab_x/y (press point), pending_grab_edges.
+  - New helpers (before vile_grab_end): vile_grab_arm (records pending +
+    focuses the window; no movement), vile_grab_disarm,
+    vile_grab_maybe_fire (fires when max(|dx|,|dy|) > 4; anchors the grab
+    on the PRESS point so the window follows exactly from where the drag
+    started — no shortfall on the first step). Forward declarations added
+    at the top of main.c.
+  - vile_process_cursor_motion: the grab check is now
+    "if (vile_grab_maybe_fire(server)) { vile_grab_update(server);
+    return;}" (a pending grab below threshold falls through to normal
+    hover/focus; the client keeps getting pointer events).
+  - vile_cursor_button: press arms instead of beginning (Super+left,
+    Super+right, title-bar, edge — all four call sites changed to
+    vile_grab_arm); release disarms a pending grab (plain click — the
+    client already has press + release, so CSD buttons work) or ends a
+    real grab. Client-initiated request_move / request_resize handlers
+    still call vile_grab_begin_* directly (the client already decided
+    it's a drag).
+  - Pending grab cleared in vile_toplevel_unmap and
+    vile_toplevel_destroy (stale-pointer safety).
+- Result: drag harness run 4: 5c restored rect matches exactly
+  (366,136,1192,924), 6a/6b/6c minimize + dock restore + Super+J restore
+  all pass.
+
+4. SYSTEM MENU LOG OUT (compositor/src/main.c)
+- VILE_MENU_H 312 -> 352; new "Log Out" text row at y 270 (between
+  Settings at 230 and Power Off, now at 310 with glyph at 320); new
+  shell_menu_logout_rect (y+260, h 40); click branch closes the menu and
+  calls wl_display_terminate(server->display) (clean exit — back to the
+  LightDM greeter when launched from a session, back to the TTY login
+  when launched from a console). Menu geometry is now 300x352 at
+  (1620,680) at 1920x1080; the menu-open log line still says "Lock
+  (1620,860 300x40) Settings (1620,900 300x40) Power (1620,980 300x40)"
+  — it was not updated for the new rows (cosmetic, noted).
+
+5. SESSION ENTRY — WAYLAND-SESSIONS DESKTOP FILE
+- ~/workspace/vile-os-publish/vile-install.sh step 4 now installs
+  /usr/share/wayland-sessions/vile.desktop via sudo tee ([Desktop
+  Entry] Name=Vile, Comment=Vile OS — custom wlroots compositor,
+  Exec=/usr/local/bin/vile, Type=Application, DesktopNames=Vile) so
+  LightDM lists "Vile" next to Cinnamon. bash -n syntax OK. No separate
+  .desktop file in the repo — the heredoc is self-contained. The archiso
+  profile was NOT touched (the ISO uses getty autologin, not LightDM).
+- VERIFIED (~21:10 EST and ~22:05 EST): the install is unconditional
+  (not inside an if) in step 4; the .desktop has all required fields for
+  a Wayland session entry; desktop-file-validate is not installed on
+  this VM so validation was by inspection only.
+- NOTE: the publish tree has its own copy
+  (~/workspace/vile-os-publish/screenfit/) which was NOT synced with the
+  ScreenFit dark change — the parent must sync it before the GitHub
+  push. The publish tree was also NOT synced with the new main.c /
+  install-script changes.
+
+6. SCREENFIT DARK MODE (~/workspace/intel-display-center/src/screenfit.py)
+- ScreenFit had NO CSS at all (plain Adwaita light). Added CSS_DARK
+  block (same tokens as Settings' CSS_DARK: window #0F0B1A, text
+  #EDE9FE, headerbar #241640, buttons #6D4AFF / hover #7D5CFF,
+  secondary/disabled #2A2140, combobox/entry #171228 + #2A2140 border,
+  scale trough #2A2140 + highlight/slider purple, checkbutton purple
+  when checked) applied via a Gtk.CssProvider at APPLICATION priority in
+  __init__, plus gtk-application-prefer-dark-theme = True. Preview
+  mini-desktop rethemed in code: gradient now Vile dark purple
+  (0.14,0.09,0.25 -> 0.06,0.04,0.10) instead of Cinnamon blue, panel
+  dark purple (0.09,0.07,0.16), menu button Vile purple (0.43,0.29,1.0)
+  instead of Cinnamon mint green; comments updated. Function identical;
+  xrandr logic untouched. python3 -m py_compile OK.
+- VERIFIED visually (~21:26 EST, re-verified ~22:22 EST):
+  vile-screenfit-02.png sha e3c3cc31 — dark window, dark purple
+  headerbar, light text, purple sliders/buttons, preview mini-desktop
+  draws (gradient + blob + taskbar with menu button + app icons, 5%
+  shrink border visible). "xrandr not found" at the bottom is expected
+  headless.
+- SCREENFIT PREVIEW BUG FOUND + FIXED (~21:20-21:26 EST): the ScreenFit
+  dark window shot showed the preview area flat #0F0B1A — the
+  mini-desktop wasn't drawing. Log showed "TypeError: Couldn't find
+  foreign struct converter for 'cairo.Context'" (twice). Root cause:
+  the python3-gi-cairo package (the PyGObject<->cairo bridge) was
+  missing — the wipe took it and the apt replay didn't include it.
+  python3-cairo (pycairo) alone is NOT enough; import order (import
+  cairo before/after Gtk, explicit "from gi.repository import cairo")
+  did NOT fix it — proven with three minimal repro apps under the
+  compositor (mini_after, mini_before, mini_gi all failed with the same
+  TypeError). After "sudo apt-get install -y python3-gi-cairo"
+  (3.48.2-1), the same repro printed "DRAW OK after <class
+  'cairo.Context'>" twice, no TypeError. LESSON: see the wipe #4 apt
+  list above. The Dell install script already lists python-cairo —
+  whether Arch's python-gobject pulls in the cairo bridge there is a
+  Dell-check item; the preview working on the Dell is unproven until
+  then.
+
+7. NEW BATCH — DOCK TRANSPARENT + REORDER + UNPIN + SETUP ICON
+   + BAR CORNER REMOVAL + OVERLAY DELETION (Nov 10 ~16:31 batch,
+   implemented ~21:40-22:00 EST, all in compositor/src/main.c)
+- OVERLAY DELETION (item 7, overrides the theme agent's skip-list fix
+  and the original item 4): deleted vile_load_logo / vile_fit_logo /
+  vile_reload_logo entirely (5818 chars) + all call sites + struct
+  fields (logo_node, logo_buffer) + forward decls + the three
+  startup-anim blocks. arch-logo.png / arch-logo-dark.png files left on
+  disk, unreferenced. Verified: no runtime wlr_log line contains
+  "overlay" anymore (grep rc=1); vile_paint_cairo still used elsewhere
+  (lock avatar), so no dead helper. The blur-file one-liner from the
+  original brief is moot — there is no overlay left to skip.
+- BAR CORNER REMOVAL (item 5): deleted the "Left: V tile + Vile" block
+  from vile_shell_render_bar (glow, shadow, tile, "Vile" text,
+  shell_logo_rect assignment) and the logo-click branch from
+  vile_shell_click; removed the shell_logo_rect field. Key finding from
+  the code read: the bar-logo click opened SETTINGS
+  (vile_spawn_settings), NOT the menu — the status pill ALREADY opened
+  the menu (vile_shell_set_menu(server, true)), so removing the logo
+  deletes that branch and the menu is NOT orphaned. Ribbon V stays as
+  the dock Settings icon + wizard welcome.
+- TRANSPARENT DOCK + DOCK MODEL (items 1-4):
+  - Model: enum vile_dock_app (DOCK_FOOT/SETTINGS/SCREENFIT/FILES/
+    SETUP) + vile_dock_app_names[] + #define VILE_DOCK_MAX 8 (moved
+    before the server struct — the struct sizes dock_order[VILE_DOCK_MAX]
+    from it). dock_order[VILE_DOCK_MAX] + dock_n + dock_setup_shown;
+    per-slot rects shell_dock_rects[VILE_DOCK_MAX]; anim arrays widened
+    [4]->[VILE_DOCK_MAX], indexed by SLOT. Old named rects
+    (shell_dock_foot_rect etc.) deleted.
+  - vile_dock_layout(server): dock width from dock_n
+    (PAD*2 + ICON*n + GAP*(n-1)), centred, node at (dock_x-40,
+    dock_y-20); called by vile_shell_fit and after every order change.
+  - vile_shell_render_dock rewritten: surface keeps old size/margins
+    (40px sides, 20px top) but paints NOTHING except icons + running dots
+    + (during a reorder) the insertion indicator. Bare glyphs: foot ->
+    foot-logo.png, Settings -> vile-logo.png, ScreenFit -> code-drawn
+    monitor glyph (no tile), Files -> new files-icon-bare.png, Setup ->
+    code-drawn gear (8 teeth + ring + hub, purple, no tile). Icon loader
+    in vile_shell_create tries the bare file first, falls back to the
+    dark tile variant. vile_dock_draw_icon() helper draws one icon in a
+    cell with a scale around the cell centre.
+  - Persistence: ~/.config/vile/dock-pinned (one app id per line, in
+    order; missing file -> defaults foot/settings/screenfit/files;
+    existing-but-empty file -> empty dock, i.e. user unpinned everything;
+    lines-but-none-valid -> defaults, i.e. corrupt).
+    vile_dock_load() / vile_dock_save() (setup filtered out of the file).
+    Setup hidden marker: ~/.config/vile/dock-setup-hidden.
+  - Setup lifecycle: vile_dock_setup_incomplete() = no setup-done marker
+    (does NOT check VILE_NO_SETUP — that env var only stops the wizard
+    auto-opening, so the icon still shows in harnesses). Setup appended
+    at the END when incomplete and not unpinned; vile_dock_refresh()
+    (called from the 1s vile_shell_update timer) makes it disappear
+    within a second of the wizard writing setup-done; cached state is
+    updated BEFORE re-layout so the nested refresh from fit sees no
+    change (recursion bound to one level).
+  - Reorder (item 2): left-press on a dock icon ARMS the slot (no
+    activation yet); a 400ms one-shot hold timer (dock_hold_timer,
+    created in main() next to shell_timer, callback
+    vile_dock_hold_timer_cb) starts the reorder if the button is still
+    down and the pointer moved <=12px; the dragged icon follows the
+    pointer x (lifted 10px, scale 1.15, drawn last) with a thin purple
+    insertion-indicator bar at the drop slot's left boundary;
+    vile_dock_drop_slot() = nearest slot centre to the pointer x,
+    clamped [0, dock_n-1]. Release: vile_dock_release() (called from
+    vile_cursor_button release branch) commits the move (memmove +
+    vile_dock_save, log "dock: reorder '<app>' <old> -> <new>"), or if
+    it was a quick click with no movement -> pop +
+    vile_shell_dock_activate_app(); a drag-away (>12px, no reorder) does
+    nothing. Motion handler: reorder drag owns the pointer (re-render +
+    vile_schedule_frames); armed press tracks >12px movement
+    (dock_press_moved). Setup IS draggable within the session but its
+    position is not persisted (returns to the end on reload).
+  - Unpin (item 3): right-press on a dock icon opens a small context
+    menu (shell_unpin_node + buffer, 200x56, one "Unpin" row, positioned
+    above the icon, clamped to the output; vile_shell_render_unpin +
+    vile_shell_set_unpin). Clicking the row unpins (remove from order,
+    save, re-render, log "dock: unpinned '<app>'" + centres line);
+    clicking elsewhere closes it. Unpinning Setup sets the hidden marker
+    + removes the icon. Opening the unpin menu closes the system menu
+    and vice versa. Dock = pinned set only (+ Setup when shown); no
+    re-pin UI (out of scope — unpinned apps still reachable via
+    Super+Enter / Super+J/K).
+  - vile_shell_click now takes a button parameter (forward decl + caller
+    in vile_cursor_button updated); unpin-menu handling runs first, then
+    the system menu, then the bar, then the dock.
+    vile_shell_dock_activate (string prefix) replaced by
+    vile_shell_dock_activate_app(server, app_enum) (Files -> focus
+    existing or spawn; Setup -> vile_spawn_setup() — note it takes NO
+    arguments; Settings/ScreenFit/foot -> find-or-spawn).
+  - Log-line compatibility (harnesses parse these):
+    vile_dock_log_centres() logs "Vile: dock: N entries" then "Vile:
+    shell: dock foot icon centre (X,Y), settings centre (X,Y),
+    screenfit centre (X,Y), files centre (X,Y)" + ", setup centre (X,Y)"
+    when shown; an app not on the dock logs (0,0). Logged at shell
+    create and on every dock order change. Unpin menu logs "Vile: shell:
+    unpin menu open for '<app>' at (X,Y) WxH row centre (RX,RY)".
+  - Anim tick loops widened from 4 to dock_n (eff[VILE_DOCK_MAX]);
+    vile_anim_dock_hover loops over dock_n; hover hit-test in
+    vile_process_cursor_motion now uses vile_dock_slot_at() (returns the
+    slot directly).
+- COMPILE FIXES needed during the new-batch build (~21:50-21:56 EST):
+  (1) vile_dock_slot_at used in the motion handler before its definition
+  — added forward decl; (2) vile_spawn_setup() takes no args (was called
+  with server); (3) VILE_DOCK_MAX defined after the server struct —
+  moved the define + enum + names table to just after VILE_OUT_W /
+  VILE_OUT_H (line ~340); (4) removed a leftover unused
+  "struct wlr_box *b;" in shell_click. Final binary sha after the new
+  batch: 73d54d20 (built Nov 10, 2026 ~21:58 EST). Compiles clean (only
+  pre-existing warnings).
+
+8. HARDWARE DETECTION — VERIFIED, NOT REBUILT (~21:00-21:10 EST)
+- Read settings/vile-settings.py — CPU model from /proc/cpuinfo ("model
+  name", cleaned of (R)/(TM)/" CPU"), cores counted, MHz from "cpu MHz"
+  -> "Model @ X.XXGHz"; storage from statvfs("/") + read_root_device()
+  (nvme0n1p3 -> nvme0n1) for the storage pill; GPU GpuInfo detects via
+  lspci (VGA/3D/display lines, vendor from model string) then
+  /sys/class/drm/card*/device/vendor (PCI IDs 0x8086 intel, 0x1002 amd,
+  0x10de nvidia), generic model fallback ("Intel Graphics"); usage AMD
+  gpu_busy_percent, NVIDIA nvidia-smi, Intel intel_gpu_top -> engine
+  busy deltas -> i915 debugfs; VRAM AMD mem_info_vram_total, NVIDIA
+  nvidia-smi memory.total, Intel -> "Shared memory". All real data from
+  /proc, sysfs, statvfs; unreadable -> "—" or card omitted. On this VM
+  it honestly shows "— / No GPU detected" — correct, not a bug.
+  DELL-UNPROVEN: Intel UHD 620 showing as Intel integrated with live
+  usage, NVMe storage pill "nvme0n1", CPU temp sensor on the Dell,
+  battery card.
+
+9. NEW FILES / ASSETS
+- compositor/tests/run-drag-test.sh (315 lines): three sessions.
+  Session 1 phases: 0 = first-session dock clicks (Settings/Files/
+  ScreenFit, no restart); 1 = keybinds (Super+Enter, Super+J/K,
+  Super+F on/off, Super+Escape, Super+Q); 2 = title-bar drag (stack
+  foot (1400,26) -> (1100,150), expected drop (666,136,942,924),
+  mid-drag + dropped shots); 2b = close the tiled master foot so phases
+  3-6 have a single floating foot; 3 = Super+drag (window body centre,
+  dx -300); 3b = Super+right-drag resize (bottom-right quadrant,
+  w +100); 4 = right-edge drag (w +150); 5 = maximize via foot's CSD
+  button (maximize at right-36, minimize at right-64, y = top+15;
+  second click restores; maximize + Super+F restores); 6 = minimize via
+  foot's CSD button (dock click restores; minimize + Super+J restores);
+  7 = system menu (status pill at (1855,1060), Log Out row at
+  (1770,960) — clicking it ends the session, exit code checked).
+  Session 2: wallpaper vile-purple-arch-blur.jpg — overlay must be
+  SKIPPED (log "overlay skipped", no "overlay loaded"). Session 3:
+  wallpaper vile-nebula.jpg — overlay must still LOAD. Uses a scratch
+  HOME /tmp/vile-drag-home (foot.ini copied, wallpaper hook written),
+  VILE_QUIT_AFTER_SEC=240 (session 1), VILE_NO_SETUP=1,
+  VILE_LOCK_USER=viletest. Dock icon centres parsed from the compositor
+  log line ("dock foot icon centre…"). Foot CSD button positions
+  measured from a real screenshot (vile-explore-foot.png sha 81641c79,
+  read by eye Nov 10, 2026 ~20:40 EST): minimize ~(1844,27), maximize
+  ~(1872,27), close ~(1896,27) for a window at (12,12,1896,924) — i.e.
+  maximize = right edge -36, minimize = right edge -64, y = top+15.
+  The foot window in that shot shows the banner "VILE OS · v0.5.4" and
+  the known test-env [colors-dark] error line.
+- compositor/tests/run-dock-test.sh: scratch HOME /tmp/vile-dock-home
+  (no setup-done -> Setup icon shows), 5 phases: 0 transparent dock +
+  Setup icon (5 entries); 1 hold-drag reorder foot 0->1 (checks log +
+  dock-pinned order "settings foot screenfit files"); 2 right-click
+  ScreenFit -> Unpin menu -> click Unpin (checks log + dock-pinned
+  "settings foot files"); 3 write setup-done marker -> Setup icon gone
+  (3 entries); 4 bar without V tile + menu from status pill (1855,1060);
+  5 nebula wallpaper, no overlay log lines. Shots
+  vile-dock-01-bare.png … vile-dock-08-nebula.png.
+- compositor/tests/run-files-13-test.sh: Files rename + trash click-path
+  test. Opens Files at scratch tree /tmp/vile-files-13-test with scratch
+  HOME /tmp/vile-files-13-home (own Trash via XDG_DATA_HOME), clicks a
+  file, F2 -> rename dialog -> type new name -> Enter, checks
+  notes-renamed.txt on disk; Delete -> confirm -> Enter, checks todo.md
+  gone from folder AND in Trash/files; Delete + Escape on budget.csv
+  checks the cancel path.
+- compositor/tests/vptr_test.c: new "drag x1 y1 x2 y2 [hold_ms]" action
+  (press BTN_LEFT, 12 motion steps, optional hold so a screenshot can be
+  taken mid-drag, release — one process, button stays held) and "rdrag"
+  (same with BTN_RIGHT 0x111, for Super+right-drag resize tests). Needs
+  wlr-virtual-pointer-unstable-v1-client-protocol.c linked (the header
+  comment's old build line without it fails with undefined
+  zwlr_virtual_pointer_v1_interface). Rebuilt OK. Also added "rclick
+  x y" (BTN_RIGHT press+release) and "holddrag x1 y1 x2 y2" (press
+  BTN_LEFT, hold 600ms still so the 400ms hold timer fires, then 12
+  motion steps, release) for dock reorder/unpin tests. Rebuilt Nov 10,
+  2026 ~21:56 EST (BUILD_OK).
+- compositor/tests/vkey_test.c: new --hold flag (vkey_test --hold
+  Super_L — presses keys and holds them until killed, so another client
+  can drag with the modifier held). Rebuilt OK.
+- ~/workspace/vile-os/assets/files-icon-bare.png (512x512, sha
+  f30b26d1): bare purple folder + white page, generated from
+  files-icon.png by PIL flood-fill from tile seeds (256,60), (60,256),
+  (452,256), (256,452), (100,100), (412,100) with tolerance 45 around
+  tile colour (20,14,42) — 145,575 tile pixels removed, 92,038 opaque
+  pixels remain. Verified by eye composited over nebula and over light:
+  clean, no halo; only a faint 1px rounded-rect outline remains (the
+  tile's edge stroke — reads as part of the glyph, accepted).
+
+10. HARNESS DEBUGGING SAGA — RESOLVED (Nov 10, 2026 ~20:45-22:28 EST)
+- DRAG HARNESS RUN 1: Phase 0 passed except the close-count check;
+  keybinds mostly passed; drag mechanism WORKED (log: "grab move 'foot'
+  from 12,12 1896x924", then "from -288,136") but all later phases
+  failed on geometry. Root cause: phase 0's 3x Super+Q closed the foot
+  itself — ScreenFit had never spawned under the scratch HOME (the
+  compositor looks up screenfit relative to $HOME; scratch HOME broke
+  ~/workspace/intel-display-center/src/screenfit and
+  ~/.local/bin/screenfit, and screenfit is not on PATH on this VM), so
+  only 2 apps were open and the 3rd Q killed the foot. Fixed with a
+  symlink ($TEST_HOME/.local/bin/screenfit -> real screenfit.py).
+- DRAG HARNESS RUN 2: 0d failed: Files' window title is the folder name
+  (vile-drag-home), not "Files", so the "window mapped 'Files'" check
+  missed it, NOPEN counted 2, Settings stayed open, and the phase-2 drag
+  grabbed SETTINGS (log: "grab move 'Settings' from 966,12 942x456").
+  Also the harness died mid-phase-3 (set -u on an empty rect when
+  float_rect returned nothing).
+- DRAG HARNESS RUN 3 (~20:50 EST): Phase 0 ALL PASS, Phase 1 ALL PASS.
+  Phase 2: grab started, window floating, other window re-tiled full
+  width — dropped screenshot vile-drag-03-dropped.png (sha 6e9ab045,
+  READ BY EYE) proves the drag worked: the floating foot is visibly at
+  ~(666,136) with its own title bar and banner, overlapping the
+  full-width tiled foot. But the harness's float_rect read the STALE rect
+  (966,12) — vile_tile doesn't run during a drag. Every later phase then
+  computed coordinates from the stale rect. Phase 5d PASSED (Super+F
+  unmaximized a maximized window), phase 6c PASSED (Super+J restored a
+  minimized window — log 41.326s "restored 'foot'"; minimize proven by
+  log 40.271s "minimized 'foot'"). Phase 7 ALL PASS. Sessions 2 and 3
+  ALL PASS (8a/8b blur skip, 9a nebula overlay loaded). Failures were
+  2c, 3a, 3b, 4b, 5a, 5b, 6a, 6b — all attributable to the stale-rect
+  harness bug and overlapping-window stacking. One open question from run
+  3: an unexplained maximize at 32.973-32.974s (log: "grab move from
+  12,12 1908x924" then "maximized 'foot'" 1ms later — press was at
+  (1305,598), inside the master foot's body, not its title bar or
+  maximize button; theories exhausted).
+- FIXES applied after run 3: (1) vile_grab_end logs the final rect; (2)
+  harness float_rect() reads the grab-end line; (3) new phase 2b closes
+  the tiled master foot (Super+J focuses it, Super+Q closes it) so
+  phases 3-6 have a single floating foot.
+- DRAG HARNESS RUN 4 (~21:18 EST, after the click-vs-drag fix): ALL 40
+  CHECKS PASS. The unexplained maximize from run 3 did NOT reproduce in
+  the clean single-foot layout — it was a harness artifact (overlapping
+  windows), as suspected. Key shots read by eye:
+  vile-drag-03-dropped.png sha 589712d0 (floating foot at (666,136)
+  overlapping the re-tiled master), vile-drag-06-maximized.png sha
+  0f70cb42 (single foot fills the work area, dock still visible),
+  vile-drag-07-minimized.png sha 66fd4843 (foot gone, bare desktop, ONE
+  logo only — overlay skip working), vile-drag-09-menu.png sha 30116ed6
+  (system menu: Wi-Fi Unavailable / Volume slider / Battery No battery /
+  Lock / Settings / Log Out / Power Off).
+- DRAG HARNESS RUN 5 (~22:00 EST, after the sed fix below): ALL 40
+  CHECKS PASS again. Phase 0 first-session dock clicks all pass with NO
+  restart (0a Settings spawns, 0b mapped, 0c Files spawns, 0d mapped, 0e
+  ScreenFit spawns, 0f mapped, 0g closed, exactly 1 foot left). Phases
+  1-7 all pass: keybinds (Super+Enter/J/K/F on/off/Escape/Q), title-bar
+  drag, Super+drag, Super+right-drag resize (w +100: 942->1042),
+  right-edge resize (w +150: 1042->1192), maximize via CSD button +
+  restore (5c rect matches exactly 366,136,1192,924), Super+F on
+  maximized restores, minimize via CSD button + dock restore + Super+J
+  restore, status pill -> menu -> Log Out clicked -> compositor exited
+  cleanly (exit 0). Sessions 2/3: 8a/8b/9a no-overlay checks pass.
+  Shots read by eye: vile-drag-11-nebula.png sha f3fdf273 (bare nebula
+  desktop, flowing purple smoke/ribbons, NO Arch logo anywhere;
+  transparent dock 5 bare icons; bar no V tile; clock "22:01 Tue 10
+  Nov"), vile-drag-07-minimized.png sha adb6b223 (foot window gone
+  (minimized); bare desktop = Purple Arch wallpaper with its own
+  baked-in logo only (one logo, no double); dock 5 bare icons, foot
+  running dot still present).
+- DOCK HARNESS — ALL 14 PASS (~22:00 EST), after two debugging rounds
+  (rclick arg order; unpin-row grep). Key log evidence: reorder drag
+  'foot' (slot 0) -> reorder 'foot' 0 -> 1 -> dock-pinned "settings foot
+  screenfit files"; unpin menu open for 'screenfit' at (860,884) row
+  centre (960,912) -> unpinned 'screenfit' -> dock-pinned "settings
+  foot files"; setup icon gone (setup complete) -> dock: 3 entries;
+  status pill opens menu; no overlay lines on nebula. Shots read by eye
+  (all 1920x1080, in ~/workspace/vile-os/screenshots/):
+  vile-dock-01-bare.png sha fdab4241 (transparent dock, 5 bare icons
+  (foot footprint+">_"+"foot", ribbon V, monitor glyph, purple folder,
+  gear), foot running dot, bar with NO V tile, clock "21:59 Tue 10 Nov",
+  status pill; foot window tiled with banner "VILE OS · v0.5.4" (white
+  title bar = known test-env foot 1.16.2 quirk, not a bug)),
+  vile-dock-02-reorder.png sha f130d538 (dock order now [V, foot,
+  monitor, folder, gear], foot running dot under slot 1),
+  vile-dock-03-unpin.png sha b1e20363 (Unpin menu open above the
+  ScreenFit icon (dark card, "Unpin"), dock order [V, foot, monitor,
+  folder, gear]), vile-dock-05-setupgone.png sha c4c7cf42 (dock
+  re-centred to 3 icons [V, foot, folder]; gear gone, monitor gone),
+  vile-dock-07-menu.png sha 8e47a04e (system menu from the status pill:
+  SYSTEM, Wi-Fi Unavailable, Volume slider, Battery No battery, Lock,
+  Settings, Log Out, Power Off; bar has no V tile),
+  vile-dock-08-nebula.png sha c4c7cf42 (same sha as 05; foot window
+  covers the wallpaper in this shot, so the nebula wallpaper itself is
+  not visible here — the drag harness's bare-desktop nebula session is
+  the real visual proof).
+- HARNESS BUGS FIXED THIS SESSION:
+  (a) run-drag-test.sh: harness now exports
+  PATH="$REAL_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+  (ninja/meson live in ~/.local/bin); float_rect() now reads the last
+  "grab.* end 'foot' at" line (handles negative coords) instead of the
+  stale "tiling: floating" line. Pre-existing sed bug: FILES_Y and
+  FOOT_Y referenced \2 but their patterns capture only one group -> sed
+  error + fallback Y=996 (still inside the 56px icon, which is why
+  clicks passed). Changed \2 -> \1 in both lines.
+  (b) run-dock-test.sh: fixed rclick() argument order (was
+  ./tests/vptr_test "$1" "$2" rclick = "vptr_test 960 988 rclick", which
+  silently becomes a plain move with no button event — the rclick mode is
+  mode-FIRST: "vptr_test rclick <x> <y>"); fixed the centres parse to
+  read the centres log line (not the "shell created:" line, which no
+  longer carries centres) with full tokens ("dock foot icon centre",
+  "settings centre", ...) via a parse_centres() helper + re-parse before
+  phase 2; fixed VILE_WALLPAPER to use the literal
+  /home/hatch/... path (it used $HOME, which was already the scratch
+  TEST_HOME); changed the unpin-row grep from "unpin menu at" to "unpin
+  menu open" to match the new log line.
+  (c) run-screenfit-test.sh (~22:20 EST): the harness parsed the
+  ScreenFit centre from the old "shell created:" log line (which no
+  longer carries centres) and fell back to stale coords (1032,996) —
+  which is now the FILES icon in the 5-icon dock. The first run opened
+  FILES, not ScreenFit (shot vile-screenfit-02.png read by eye: the file
+  manager, "hatch" home folder). Fixed to parse the centres log line
+  ("dock foot icon centre") with fallback (960,988) (the 5-icon
+  ScreenFit centre). Re-run: ScreenFit opened (log "anim: close fade
+  'ScreenFit'"), shot vile-screenfit-02.png sha e3c3cc31 read by eye —
+  dark ScreenFit window, purple sliders/buttons, dark preview. All other
+  harnesses (anim, dock-files, drag, look, theme) already parse from
+  'dock foot icon centre' — verified by grep; only screenfit had the
+  stale parse.
+  (d) run-files-13-test.sh cell coords: the guessed cells (180/360/540,
+  y=176) were WRONG — the sidebar ends ~x210, so the real cells are
+  further right. Measured from a probe shot
+  (vile-files-13-probe.png sha 8774424a, PIL pixel scan of the white page
+  glyphs): budget.csv (326,176), notes.txt (536,176), todo.md (746,176)
+  (~210px spacing). Updated the harness.
+  (e) run-files-13-test.sh trash confirm: the first run PASSED rename
+  (13a) and cancel (13d) but FAILED trash (13b/13c). Root cause: the
+  delete-confirm dialog's default response is CANCEL
+  (filemanager/vile-files.py line 1553, a deliberate safety choice), so
+  pressing Return CANCELLED the delete (the trashed shot shows the dialog
+  gone, todo.md still there). The rename dialog defaults to OK (line
+  1482), which is why Return worked there. FIX: the harness now CLICKS
+  the "Move to Trash" button instead of pressing Return. Button label
+  measured from vile-files-13-trash.png (PIL text scan): centre
+  (1420,140); Cancel label at (1115,140). Re-run: FILES-13 ALL 4 PASS.
+  The trash shot (vile-files-13-trash.png sha 7c26135e) shows the dialog
+  "Move 'todo.md' to Trash?" open with Cancel / Move to Trash buttons;
+  the trashed shot (vile-files-13-trashed.png sha c8d1d17e) shows
+  todo.md gone from the grid and the status bar "'todo.md' moved to
+  Trash."
+
+11. FULL REGRESSION SUITE — ALL 13 PASS (Nov 10, 2026 ~22:02-22:19 EST)
+Ran sequentially in one background exec (proc_c008aaeb4b08, exit 0):
+run-look-test.sh rc=0, run-input-test.sh rc=0, run-tiling-test.sh rc=0,
+run-anim-test.sh rc=0, run-files-test.sh rc=0, run-files-11-test.sh
+rc=0, run-files-12-test.sh rc=0, run-settings-test.sh rc=0,
+run-setup-test.sh rc=0, run-theme-test.sh rc=0, run-dock-files-test.sh
+rc=0, run-wallpaper-test.sh rc=0, run-lock-test.sh rc=0. (Settings/setup
+tails show "ERROR: test avatar missing: /tmp/vile-test-avatar.jpg" —
+benign, rc=0; the /tmp avatar was wiped.)
+Key regression shots read by eye:
+- vile-look-01.png sha 207ae9d6 (dark bare desktop: Purple Arch
+  wallpaper with its own baked-in logo (ONE logo — the wallpaper's own,
+  no overlay double); transparent dock 5 bare icons; bar no V tile,
+  clock "22:02 Tue 10 Nov", status pill; dark theme matches 0.5.3).
+- vile-theme-08-light-1280x800.png sha 402d7636 (light theme: light
+  lavender-white bar with dark text "22:17 Tue 10 Nov", light status
+  pill, bare purple dock icons, transparent dock; wallpaper is the dark
+  Purple Arch — the light theme doesn't change the wallpaper).
+- vile-lock-01.png sha 84985c85 (lock screen: blurred Arch wallpaper
+  (its baked-in logo visible faintly through the blur — that's the lock
+  screen's own background, not the deleted overlay), huge clock "22:19",
+  date "Tuesday, November 10", user card "viletest" with purple V avatar
+  + LOCKED + password field, gear bottom-right, "EN • Vile OS"
+  bottom-centre; no dock, no bar).
+
+12. FIRST-SESSION DOCK-CLICK BUG — STATUS
+- Headless first-session dock clicks PASS with no restart in both the
+  drag harness run 4 (~21:18 EST) and run 5 (~22:00 EST) (phase 0: 0a
+  Settings spawns, 0b mapped, 0c Files spawns, 0d mapped, 0e ScreenFit
+  spawns, 0f mapped, 0g closed, exactly 1 foot left). The QEMU/ISO
+  first-session failure (reproduced twice, cause unknown) remains
+  unexplained and unproven on real hardware; Adnan has not yet answered
+  whether dock icons opened apps on the first try on the Dell. Do NOT
+  claim first-boot dock clicks proven until the Dell run says so.
+
+SHAS AT END OF THIS SESSION (Nov 10, 2026 ~22:28 EST)
+- main.c: edd4c7dc7e8e33f1f720914b065ac362a4a342968693f4c9fd1fbc989d8ae4c3
+  (post-new-batch; no main.c change since the new-batch build)
+- binary compositor/build/vile: 73d54d20d5208f4d4252119dfc8d29bab773f90cc659fc8fb6b8ba09b699b22a
+  (built Nov 10, 2026 ~21:58 EST, after the new batch)
+- /tmp/vile-files-vile (snapshot binary): 86756a05bad3b8654c2cfa8f3caf87a2e36d773614088392f36919715ecd5529
+- settings/vile-settings.py: 0.3.0 (unchanged this session; detection
+  code verified by reading, not rebuilt)
+- filemanager/vile-files.py: 1.2.0 (unchanged this session)
+- setup/vile-setup.py: 0.5.4 (unchanged this session)
+- ScreenFit: dark CSS added this session (screenfit.py, in
+  ~/workspace/intel-display-center/src/screenfit.py)
+
+STILL OPEN / UNPROVEN (do not claim otherwise)
+- Real-hardware gate (Dell checklist): first-boot dock clicks (the open
+  QEMU bug — check FIRST thing), DRM/GLES2 on the Intel GPU (UHD 620),
+  real keyboard/mouse + visible mouse arrow, lock (Windows+L) + PAM
+  unlock with HIS login password, Reboot/Power Off (never clicked in any
+  test), a real USB stick appearing in Files' This PC, xdg-open/rename/
+  trash click paths (rename + trash click paths are NOW proven headless
+  via files-13; xdg-open on file double-click still unproven), ScreenFit
+  actually adjusting the display (TV overscan), System monitor battery
+  card + CPU temp sensor + live GPU usage + network rates (all unproven
+  until the Dell), wizard's real Arch installs (paru/AUR Helium as user
+  adnan, sudo password flow), live ISO timezone defaults to UTC until
+  set on the Dell. If a lock ever freezes on Enter like v1 hyprlock did,
+  that is a bug — photo + log, switch TTY (Ctrl+Alt+F2, on this Dell
+  possibly Ctrl+Alt+Fn+F2) to kill it rather than forcing power off.
+- The new dock features (transparent dock, hold-drag reorder,
+  right-click Unpin, Setup icon lifecycle) and the overlay deletion +
+  bar-corner removal are implemented and harness-proven headless (dock
+  14/14, drag 40/40) but unproven on the Dell until Adnan runs 0.5.4
+  there.
+- VolumeMonitor signal path for real USB plug/unplug (poll path proven;
+  signal path wired only). Click-to-mount for an unmounted volume
+  (implemented, unproven).
+- Files: xdg-open on file double-click; click-to-focus when Files is
+  already open; click pop on the Files dock icon specifically.
+- System monitor: battery card/bar, live GPU usage, CPU temp sensor +
+  bar filling, network rates above 0 B/s in the wild, root-device pill
+  "nvme0n1" — all unproven until the Dell (this VM lacks lspci,
+  /sys/class/drm, a battery, and a temp sensor; network above 0 B/s WAS
+  proven here during a real download). Intel UHD 620 as Intel integrated
+  + live usage + NVMe pill + CPU temp are Dell-unproven (detection code
+  verified by reading, Nov 10, 2026 ~21:10 EST).
+- Volume slider wiring (no audio stack to verify headless); menu true
+  live blur (impossible in wlroots — menu is near-opaque frosted-look);
+  dialogs floating instead of tiling full-height (no floating layer yet);
+  focus-border cross-fade and dock click pop have no dedicated mid-flight
+  screenshots.
+- ScreenFit actually changing a real display (headless shows "xrandr not
+  found", expected); ScreenFit dark mode IS now visually verified
+  (Nov 10, 2026 ~21:26 EST, re-verified ~22:22 EST) incl. the preview
+  mini-desktop; whether Arch's python-gobject pulls in the cairo bridge
+  (python3-gi-cairo equivalent) on the Dell is a Dell-check item.
+- archiso/build-iso.sh in the repo has not been run end-to-end (0.5.3
+  was built with the equivalent steps in build-env/).
+- Wizard bottom buttons partially hidden behind dock/bar at 1280x800
+  (Dell is 1920x1080, where they're fully visible).
+- Light theme on a real display (headless proof only); the vile.desktop
+  session entry and Log Out path on the Dell (LightDM listing + greeter
+  return unproven until he logs out there). The .desktop was validated
+  by inspection only (desktop-file-validate not available on this VM).
+- The publish tree (~/workspace/vile-os-publish/) was NOT synced with
+  the new main.c / ScreenFit / install-script changes — the parent must
+  sync it (and the ScreenFit copy) before the GitHub 0.5.4 push. Do NOT
+  rebuild the ISO and do NOT push to GitHub from this task (that is the
+  parent's next step after this report).
+- The 0.5.3 ISO is on disk untouched.
+
+### Current screenshot shas — 2026-11-10 22:30 UTC
+
+Produced by: post-theme fix queue + Nov 10 ~16:31 new batch: drag 40/40, dock 14/14, full regression 13/13, screenfit (fixed), files-13 4/4 — Nov 10 2026 ~22:30 EST
+
+| File | sha256 (first 8 … last 4) |
+|---|---|
+| `vile-anim-close-after.png` | `acd2ac1f…6011` |
+| `vile-anim-close-mid.png` | `5079ebef…e6bb` |
+| `vile-anim-dock-hover.png` | `778da18e…7250` |
+| `vile-anim-lock-mid.png` | `e6d46b27…246e` |
+| `vile-anim-menu-after.png` | `4c889724…dc82` |
+| `vile-anim-menu-mid.png` | `60b7c4e7…36d7` |
+| `vile-anim-startup-mid.png` | `355b7d30…b6a5` |
+| `vile-anim-unlock-after.png` | `acd2ac1f…6011` |
+| `vile-anim-unlock-mid.png` | `60c37c87…322b` |
+| `vile-anim-window-after.png` | `778da18e…7250` |
+| `vile-anim-window-mid.png` | `778da18e…7250` |
+| `vile-banner-01.png` | `4a0ea8a9…a51d` |
+| `vile-banner-02.png` | `31448f20…5c5c` |
+| `vile-bar-01-bare.png` | `e0ca4797…740c` |
+| `vile-bar-logo-zoom.png` | `870c30f5…57e0` |
+| `vile-bar-nebula.png` | `57d7dfa8…e0fc` |
+| `vile-bar-zoom.png` | `527f81d6…c220` |
+| `vile-dock-01-bare.png` | `fdab4241…6336` |
+| `vile-dock-02-reorder.png` | `f130d538…2042` |
+| `vile-dock-03-unpin.png` | `b1e20363…9ac2` |
+| `vile-dock-04-unpinned.png` | `592cc0a6…8488` |
+| `vile-dock-05-setupgone.png` | `c4c7cf42…956f` |
+| `vile-dock-06-bar.png` | `c4c7cf42…956f` |
+| `vile-dock-07-menu.png` | `8e47a04e…2bf5` |
+| `vile-dock-08-nebula.png` | `c4c7cf42…956f` |
+| `vile-dock-files-01.png` | `b7810168…bd8c` |
+| `vile-dock-files-02.png` | `d7938083…71b5` |
+| `vile-dock-files-03-hover.png` | `005e33fd…4847` |
+| `vile-dock-files-03-ungrown.png` | `a0350806…0964` |
+| `vile-drag-00-bare.png` | `22b986e2…e4c3` |
+| `vile-drag-00-dock.png` | `e93e685b…2292` |
+| `vile-drag-01-fullscreen.png` | `05e45763…2913` |
+| `vile-drag-02-mid.png` | `7cadc212…7feb` |
+| `vile-drag-03-dropped.png` | `7cadc212…7feb` |
+| `vile-drag-04-superdrag.png` | `317fae76…23cc` |
+| `vile-drag-04b-superrdrag.png` | `2d6cc1f0…20f0` |
+| `vile-drag-05-resized.png` | `b66293ea…929b` |
+| `vile-drag-06-maximized.png` | `0bfce179…e64b` |
+| `vile-drag-07-minimized.png` | `adb6b223…1967` |
+| `vile-drag-08-restored.png` | `a638df41…4831` |
+| `vile-drag-09-menu.png` | `bdc64141…0a54` |
+| `vile-drag-10-blur.png` | `eded6af4…1fca` |
+| `vile-drag-11-nebula.png` | `f3fdf273…f9bd` |
+| `vile-explore-foot.png` | `81641c79…c493` |
+| `vile-files-01.png` | `3e31ac68…53c3` |
+| `vile-files-02.png` | `c43f2335…c287` |
+| `vile-files-03.png` | `221cce9c…8b90` |
+| `vile-files-04-dialog.png` | `db20f7e4…efa5` |
+| `vile-files-04.png` | `c20d3ac2…7969` |
+| `vile-files-05.png` | `0fc9e2e3…eb12` |
+| `vile-files-11-devices.png` | `63cafb92…b101` |
+| `vile-files-11-drive-added.png` | `d62ae980…43e6` |
+| `vile-files-11-drive-open.png` | `8e8490f5…3243` |
+| `vile-files-11-drive-removed.png` | `6d7391e4…680c` |
+| `vile-files-11-probe.png` | `9b652eda…e39e` |
+| `vile-files-11-sidebar.png` | `586e7250…792b` |
+| `vile-files-12-bundle-zip.png` | `900b27d6…cba2` |
+| `vile-files-12-error-corrupt.png` | `16d592ad…a536` |
+| `vile-files-12-error-locked.png` | `58ff1b00…d026` |
+| `vile-files-12-extract-to-done.png` | `88acb60a…5494` |
+| `vile-files-12-extract-to.png` | `4c753f72…885a` |
+| `vile-files-12-extracted.png` | `ca05750f…29da` |
+| `vile-files-12-menu-folder.png` | `13d9686c…f18b` |
+| `vile-files-12-menu-multi.png` | `bee68b90…be3e` |
+| `vile-files-12-menu-zip.png` | `c66b7f2c…bc19` |
+| `vile-files-12-name-dialog.png` | `93deed7a…82bd` |
+| `vile-files-12-pack-zip.png` | `417f3cf4…1adb` |
+| `vile-files-12-progress.png` | `f8fc4b75…8002` |
+| `vile-files-13-probe.png` | `8774424a…8fc3` |
+| `vile-files-13-rename.png` | `0407a7a0…10de` |
+| `vile-files-13-renamed.png` | `61432e7f…4921` |
+| `vile-files-13-trash.png` | `1022c64b…a9aa` |
+| `vile-files-13-trashed.png` | `c8d1d17e…caa3` |
+| `vile-input-01.png` | `85b4b679…0a5f` |
+| `vile-input-02-closed.png` | `85b4b679…0a5f` |
+| `vile-input-02-escaped.png` | `776e9078…509b` |
+| `vile-input-02-nofocus.png` | `bf8aae49…baec` |
+| `vile-input-02-open.png` | `ea0c6147…79f6` |
+| `vile-input-02-refocus.png` | `9da37b6a…5873` |
+| `vile-input-02.png` | `de339835…3f28` |
+| `vile-input-03-unlocked.png` | `a85b22e5…d955` |
+| `vile-input-03.png` | `386117ce…3aa8` |
+| `vile-iso-boot-01.png` | `8110e773…e454` |
+| `vile-iso-boot-02.png` | `1e817616…776b` |
+| `vile-iso-boot-03.png` | `58983643…f69b` |
+| `vile-iso-boot-04.png` | `21a85a30…8593` |
+| `vile-iso-boot-05.png` | `6fe9677a…4010` |
+| `vile-iso-boot-06.png` | `c40bc7b2…3038` |
+| `vile-iso-boot-07.png` | `2736153b…07d9` |
+| `vile-iso-boot-08.png` | `f353949f…438c` |
+| `vile-iso-boot-09.png` | `71818b78…2ef1` |
+| `vile-iso-boot-10.png` | `7e06ac12…2755` |
+| `vile-iso2-boot-01.png` | `4ad1b1a1…a1fd` |
+| `vile-iso2-boot-02.png` | `07948414…f079` |
+| `vile-iso2-boot-03.png` | `8327432c…f32c` |
+| `vile-iso2-boot-04.png` | `22ea52db…ea25` |
+| `vile-iso2-boot-05.png` | `40db1b9b…b6e1` |
+| `vile-iso3-boot-01.png` | `44b6ba0e…df01` |
+| `vile-iso3-boot-02.png` | `07948414…f079` |
+| `vile-iso3-boot-03.png` | `6fe9677a…4010` |
+| `vile-iso3-boot-04.png` | `84483650…0870` |
+| `vile-iso3-boot-05.png` | `68c50222…fac2` |
+| `vile-iso3-boot-06.png` | `899a33a2…4385` |
+| `vile-iso3-boot-07.png` | `11f79308…dec6` |
+| `vile-iso3-boot-08.png` | `dd34912c…b34c` |
+| `vile-iso3-boot-09.png` | `4c2d06ef…559a` |
+| `vile-iso3-boot-10.png` | `07948414…f079` |
+| `vile-iso3-boot-10b.png` | `6fe9677a…4010` |
+| `vile-iso3-boot-11.png` | `be91db44…edd4` |
+| `vile-iso3-boot-12.png` | `540ce71b…3bf4` |
+| `vile-iso3-boot-13.png` | `8e43d1a4…1dee` |
+| `vile-iso3-boot-14.png` | `0eef67d8…bf09` |
+| `vile-iso4-boot-01.png` | `c7c8e84a…4a9f` |
+| `vile-iso4-boot-02.png` | `a4b739fd…0ad1` |
+| `vile-iso4-boot-03.png` | `58983643…f69b` |
+| `vile-iso4-boot-04.png` | `21a85a30…8593` |
+| `vile-iso4-boot-05.png` | `5ec54a69…0ec3` |
+| `vile-iso5-arrow35-zoom.png` | `2d9d5df3…f075` |
+| `vile-iso5-boot-01.png` | `7f897e03…dbd1` |
+| `vile-iso5-boot-02.png` | `07948414…f079` |
+| `vile-iso5-boot-03.png` | `47d63618…9801` |
+| `vile-iso5-boot-04.png` | `01732892…75ee` |
+| `vile-iso5-boot-05.png` | `063370cd…17a7` |
+| `vile-iso5-boot-06.png` | `850bf0b7…c143` |
+| `vile-iso5-boot-07.png` | `26ff3867…07be` |
+| `vile-iso5-boot-08.png` | `994802ce…5a1a` |
+| `vile-iso5-boot-09.png` | `1b06a0b9…37c7` |
+| `vile-iso5-boot-10.png` | `a7d21623…1638` |
+| `vile-iso5-boot-11.png` | `4ed5e290…7897` |
+| `vile-iso5-boot-12.png` | `630f58bb…08ef` |
+| `vile-iso5-boot-13.png` | `630f58bb…08ef` |
+| `vile-iso5-boot-14.png` | `3a701804…25b4` |
+| `vile-iso5-boot-15.png` | `1561cc67…dbfa` |
+| `vile-iso5-boot-16.png` | `93ae09da…a028` |
+| `vile-iso5-boot-17.png` | `bde8e33c…992e` |
+| `vile-iso5-boot-18.png` | `4c86d4e3…ff21` |
+| `vile-iso5-boot-19.png` | `102ed567…3b0e` |
+| `vile-iso5-boot-20.png` | `ec21562e…43bd` |
+| `vile-iso5-boot-21.png` | `6cebb668…95dd` |
+| `vile-iso5-boot-22.png` | `e60b18ca…3937` |
+| `vile-iso5-boot-23.png` | `450db866…1963` |
+| `vile-iso5-boot-24.png` | `172ac880…8a01` |
+| `vile-iso5-boot-25.png` | `9caedc0e…c764` |
+| `vile-iso5-boot-26.png` | `d4449af2…c869` |
+| `vile-iso5-boot-27.png` | `828b2332…3d28` |
+| `vile-iso5-boot-28.png` | `b693e066…000d` |
+| `vile-iso5-boot-29.png` | `88f24abf…80eb` |
+| `vile-iso5-boot-30.png` | `88f24abf…80eb` |
+| `vile-iso5-boot-31.png` | `fc6c0f9b…a92b` |
+| `vile-iso5-boot-32.png` | `3a4342d9…9d29` |
+| `vile-iso5-boot-33.png` | `3e445ff3…168d` |
+| `vile-iso5-boot-34.png` | `3fc809fe…878b` |
+| `vile-iso5-boot-35.png` | `7e172f1c…8373` |
+| `vile-iso5-boot-36.png` | `b50c94e7…1be8` |
+| `vile-iso5-boot-37.png` | `d021570b…6940` |
+| `vile-iso5-boot-38.png` | `47e0e38b…02a7` |
+| `vile-iso5-boot-39.png` | `8ffe311f…cdfd` |
+| `vile-iso5-boot-40.png` | `0979fa7d…83f7` |
+| `vile-iso5-boot-41.png` | `0f150522…e739` |
+| `vile-iso5-boot-42.png` | `5cd25624…9964` |
+| `vile-iso5-boot-43.png` | `407e8cb6…5860` |
+| `vile-iso5-boot-44.png` | `fa369114…eeef` |
+| `vile-iso5-boot-45.png` | `34afdf7a…c7d5` |
+| `vile-iso5-dock-zoom.png` | `9c87efe8…babb` |
+| `vile-iso5-dock32-zoom.png` | `ff70ff13…c8cb` |
+| `vile-iso5-dock33-zoom.png` | `ff70ff13…c8cb` |
+| `vile-iso5-dock34-zoom.png` | `91997dbd…83f6` |
+| `vile-iso6-boot-01.png` | `4e43bebc…f27e` |
+| `vile-iso6-boot-02.png` | `d0a4d0b8…795c` |
+| `vile-iso6-boot-03.png` | `58983643…f69b` |
+| `vile-iso6-boot-04.png` | `dd7867d3…9ef6` |
+| `vile-iso6-boot-05.png` | `05713dba…bd53` |
+| `vile-iso6-boot-06.png` | `f7efb5e2…c90b` |
+| `vile-iso6-boot-07.png` | `7814599d…2a4b` |
+| `vile-iso6-boot-08.png` | `b62234bb…bca8` |
+| `vile-iso6-boot-09.png` | `278216fb…6f54` |
+| `vile-iso6-boot-10.png` | `81be8330…6533` |
+| `vile-iso6-boot-11.png` | `e921d323…e9ea` |
+| `vile-iso6-boot-12.png` | `ed38fde7…ecb8` |
+| `vile-iso6-boot-13.png` | `de920377…2b90` |
+| `vile-iso6-boot-14.png` | `de920377…2b90` |
+| `vile-iso6-boot-15.png` | `9f78c816…dfa7` |
+| `vile-iso6-boot-16.png` | `9f78c816…dfa7` |
+| `vile-iso6-boot-17.png` | `e7769d62…c1f7` |
+| `vile-iso6-boot-18.png` | `574fa5f1…3abd` |
+| `vile-iso6-boot-19.png` | `7f837958…74e4` |
+| `vile-iso6-boot-20.png` | `7f837958…74e4` |
+| `vile-iso6-boot-21.png` | `0ed17d31…825d` |
+| `vile-iso6-boot-22.png` | `0ed17d31…825d` |
+| `vile-iso6-boot-23.png` | `beecbc07…732a` |
+| `vile-iso6-boot-24.png` | `c5a1c43b…996e` |
+| `vile-iso6-boot-25.png` | `cb13dee9…6bc9` |
+| `vile-iso6-boot-26.png` | `c5b08965…b83a` |
+| `vile-iso6-boot-27.png` | `05d90491…2fff` |
+| `vile-iso6-boot-28.png` | `4960e730…581f` |
+| `vile-iso6-boot-29.png` | `3825b365…3178` |
+| `vile-iso6-boot-30.png` | `f257b73f…41ee` |
+| `vile-iso6-boot-31.png` | `d84ebc6b…9394` |
+| `vile-iso6-boot-32.png` | `2ee5e7d4…52a8` |
+| `vile-iso6-boot-33.png` | `53c8d4ad…37ea` |
+| `vile-iso6-boot-34.png` | `ffbf7cd3…7336` |
+| `vile-iso6-boot-35.png` | `98b94f6e…f77f` |
+| `vile-iso6-boot-36.png` | `e66b03fd…5bc3` |
+| `vile-iso6-boot-37.png` | `11f3c2ad…61c6` |
+| `vile-iso6-boot-38.png` | `42ad74ce…7dae` |
+| `vile-iso6-boot-39.png` | `0f9c36f1…010d` |
+| `vile-iso6-boot-40.png` | `f79cc98d…6d3e` |
+| `vile-lock-01.png` | `84985c85…dd7f` |
+| `vile-lock-02.png` | `aca5a7d7…5e83` |
+| `vile-lock-03.png` | `97cc6595…d7ee` |
+| `vile-lock-10.png` | `1af4dfbe…3a93` |
+| `vile-lock-11.png` | `9afa92e7…4a75` |
+| `vile-lock-12.png` | `76cf8d2e…b9f0` |
+| `vile-lock-13.png` | `b205de44…b07d` |
+| `vile-logo-01-bare.png` | `2bc29bce…ccf0` |
+| `vile-logo-02-other.png` | `5f96ea37…71aa` |
+| `vile-logo-03-window-over.png` | `d809476e…b0ec` |
+| `vile-look-01-1280x800.png` | `71b5fdf4…3633` |
+| `vile-look-01.png` | `207ae9d6…5bde` |
+| `vile-look-02.png` | `18eefcb6…b976` |
+| `vile-look-03.png` | `6fa82dfc…a24f` |
+| `vile-look-menu-final.png` | `299703c9…4ecc` |
+| `vile-look-menu.png` | `4b84fc93…9797` |
+| `vile-look-settings-alone.png` | `4750f4bf…0e70` |
+| `vile-look-settings.png` | `872fc3dd…f7ab` |
+| `vile-screen-01.png` | `e585a996…5e5a` |
+| `vile-screen-02.png` | `09e3225d…a25b` |
+| `vile-screenfit-01.png` | `e439b83e…2e16` |
+| `vile-screenfit-02.png` | `e3c3cc31…3322` |
+| `vile-settings-01.png` | `6e4944af…364b` |
+| `vile-settings-02.png` | `f2b1b408…00ec` |
+| `vile-settings-03-unlocked.png` | `0590b79f…1485` |
+| `vile-settings-03.png` | `9f4e3cf3…d1cd` |
+| `vile-settings-04.png` | `0bc6a638…e2ed` |
+| `vile-settings-picker-open.png` | `3ed298d6…e8bc` |
+| `vile-settings-picker.png` | `2e52b3a5…e43b` |
+| `vile-settings-remove-probe.png` | `1a203d6b…7f88` |
+| `vile-settings-run-setup-01.png` | `8f8effc1…ef93` |
+| `vile-settings-run-setup-02.png` | `bcd8d814…fc6c` |
+| `vile-settings-run-setup-03.png` | `99f178da…f84a` |
+| `vile-setup-01-welcome.png` | `3f901955…a74f` |
+| `vile-setup-02-name.png` | `e91417ef…7a08` |
+| `vile-setup-03-picker-open.png` | `b9b2d956…2641` |
+| `vile-setup-04-name-picture.png` | `283a17bb…9b41` |
+| `vile-setup-05-wallpaper.png` | `e2be7582…1624` |
+| `vile-setup-06-wallpaper-nebula.png` | `2175fdbd…3188` |
+| `vile-setup-06b-theme.png` | `25d5ee18…0332` |
+| `vile-setup-06c-theme-light.png` | `7e7e8cd5…53de` |
+| `vile-setup-07-apps.png` | `33acf46f…8e1a` |
+| `vile-setup-08-timezone.png` | `3b28321b…0b9f` |
+| `vile-setup-09-done.png` | `ae02b4ee…2dbd` |
+| `vile-setup-10-installing.png` | `37754f0e…af08` |
+| `vile-setup-11-installing-done.png` | `1f8c78de…40ac` |
+| `vile-setup-12-desktop.png` | `6ab39a30…e50d` |
+| `vile-setup-13-lock.png` | `eb6894ae…31fd` |
+| `vile-setup-14-unlocked.png` | `6ab39a30…e50d` |
+| `vile-setup-15-second-boot.png` | `6ab39a30…e50d` |
+| `vile-system-00-top.png` | `bf7f30ce…76bb` |
+| `vile-system-01-gauges.png` | `9cd49545…6305` |
+| `vile-system-01-layout.png` | `f0958b72…2de4` |
+| `vile-system-02-cpu.png` | `b2b1bea4…c885` |
+| `vile-system-02-hardware.png` | `0aef7886…6903` |
+| `vile-system-03-load.png` | `a43fd806…c411` |
+| `vile-system-03-net-a.png` | `b917259d…0f80` |
+| `vile-system-03-net-b.png` | `e8d0203b…fa3c` |
+| `vile-system-04-idle-again.png` | `c735c21f…ba03` |
+| `vile-system-04-load.png` | `34c704a8…695c` |
+| `vile-system-05-idle-again.png` | `22285f94…3b37` |
+| `vile-theme-01-dark.png` | `6ddee24e…e249` |
+| `vile-theme-02-light.png` | `ad962ee6…925b` |
+| `vile-theme-02b-live-dark.png` | `6ddee24e…e249` |
+| `vile-theme-02c-live-light.png` | `ad962ee6…925b` |
+| `vile-theme-02d-light-foot.png` | `a947a11b…81dc` |
+| `vile-theme-03-light-menu.png` | `542e1296…01be` |
+| `vile-theme-04-light-lock.png` | `219bf5c0…1e36` |
+| `vile-theme-05-light-unlocked.png` | `9362d03d…c624` |
+| `vile-theme-06-settings-dark.png` | `1e3ef3e8…13f1` |
+| `vile-theme-07-settings-light.png` | `7b29c0d0…50a6` |
+| `vile-theme-08-light-1280x800.png` | `402d7636…a8c7` |
+| `vile-tiling-01.png` | `2bf16799…8263` |
+| `vile-tiling-02.png` | `68bb1ca2…5250` |
+| `vile-tiling-03.png` | `801e842a…16fa` |
+| `vile-tiling-fullscreen.png` | `d86bd350…2bbf` |
+| `vile-tiling-restored.png` | `801e842a…16fa` |
+| `vile-tiling-retile.png` | `988643db…97a0` |
+| `vile-tiling-wallpaper-nebula.png` | `477cb5f2…8507` |
+| `vile-wallpaper-01.png` | `56ec8d91…5c67` |
+| `vile-wallpaper-02.png` | `56ec8d91…5c67` |
+| `vile-wallpaper-03.png` | `c70bbb7e…0ee9` |
+
+_289 files. This table is the single source of truth for
+screenshot shas — older per-section values in this log are
+history and may not match disk._
+
+================================================================
+## ISO 0.5.4 — build + QEMU boot test (Nov 10-11, 2026)
+================================================================
+
+### Step 1 — archiso sync (DONE)
+Re-synced `archiso/airootfs/root/vile-os/` from the live 0.5.4 workspace
+with rsync (compositor, settings, filemanager, setup, assets,
+wallpapers, foot.ini, README.md, docs/BUILD_LOG.md, vile-install.sh
+from the publish tree; excluded compositor/build/ and __pycache__).
+ScreenFit synced from ~/workspace/intel-display-center/src/screenfit.py
++ xrandr.py into archiso/airootfs/usr/share/screenfit/ (launcher
+usr/local/bin/screenfit was already identical).
+Verified staged tree: main.c sha edd4c7dc..., Settings VERSION 0.3.0,
+assets/files-icon-bare.png (f30b26d1...), wallpapers/vile-purple-arch-
+blur-light.jpg (63b41b88...), banner + meson 0.5.4.
+`archiso/profiledef.sh`: iso_version 0.5.3 -> 0.5.4.
+`archiso/airootfs/root/VILE-README.txt` rewritten for 0.5.4 (theme step,
+transparent dock, no bar V tile, draggable windows, System monitor,
+vile-install.sh listed). Only remaining `0.5.3` string in archiso is a
+historical comment in compositor/tests/run-theme-test.sh (intentional).
+Chroot profile synced: rsync -a --delete archiso/
+build-env/root.x86_64/root/vile-iso/ then diff -r clean.
+Disk probe (urandom, home fs): 3000MB OK before the build.
+
+### Step 2 — build attempts (build15/16/17 FAILED, build18 died, build19 OK)
+Work dir reset: deleted the stale work dir
+(build-env/root.x86_64/tmp/vile-iso-work, all 0.5.3 stage markers) for
+a full fresh build.
+- build15 (exit 1, iso/build15.log): pacstrap failed — pacman SSL error
+  `self-signed certificate in certificate chain (19)` on all mirrors.
+- Root cause: the sandbox egress CA ROTATED (VM reset). Host CA
+  fingerprint C1:06:2A:2F:65:8E:5B:D7:45:7C:74:2E:43:3A:87:B1:2F:AB:CE:51;
+  chroot's copy was the old B5:7D:D8:2F:11:EB:61:BF:0B:CB:21:32:02:46:61:
+  B4:E3:EB:22:EC. Two further discoveries: (a) the exec env sets
+  SSL_CERT_FILE/CURL_CA_BUNDLE/GIT_SSL_CAINFO/REQUESTS_CA_BUNDLE/
+  AWS_CA_BUNDLE/NODE_EXTRA_CA_CERTS to /run/hatch/egress-tls/ca-bundle.pem,
+  and build12.sh's `mount --bind /run $R/run` fails (rc=32, mount point
+  with submounts), so that path doesn't exist in the chroot -> curl dies
+  with error 77; (b) copying the new CA to
+  /usr/local/share/ca-certificates/ + `trust extract-compat` does NOT
+  register it — that dir is NOT a p11-kit trust source on this Arch
+  bootstrap. Canonical fix: `chroot $R trust anchor --store
+  /usr/local/share/ca-certificates/hatch-egress-ca.crt` then `trust
+  extract-compat` — the chroot bundle then contains C1:06 (plus the two
+  stale ones, harmless), and chroot curl with the system bundle returns
+  HTTP 200.
+- `build-env/build12.sh` patched (build16 fix): binds the egress CA
+  bundle FILE into the chroot (mkdir -p $R/run/hatch/egress-tls, touch
+  target, `mount --bind /run/hatch/egress-tls/ca-bundle.pem
+  $R/run/hatch/egress-tls/ca-bundle.pem`, with matching umount) — file
+  binds work in this user namespace. Proven: chroot curl with the bound
+  file + default env = HTTP 200.
+- build16 (exit 1, iso/build16.log): same SSL error 19 — launched with
+  the CA env vars UNSET, forcing curl onto the stale system bundle.
+  Wrong move; the unset was not repeated.
+- build17 (exit 1, iso/build17.log): same SSL error 19 with default env
+  — the file bind was in the script but the system-bundle fix (`trust
+  anchor --store`) had not yet been applied at that point (applied
+  after build17).
+- build18 (killed mid-xorriso at 42.96%, 642,310,144 bytes,
+  iso/build18.log): pacstrap + squashfs SUCCEEDED (.sfs 1,350,541,312
+  bytes complete); xorriso died mid-write — disk quota again: a 6000MB
+  urandom probe failed immediately at open ("Disk quota exceeded")
+  despite df showing 48G free. Recovery per the 0.5.3 playbook: deleted
+  truncated ISO (642MB) + unpacked airootfs work/x86_64 (3.0G) + chroot
+  pacman cache (1.1G) = ~4.7GB freed; 2000MB probe then passed. All
+  stage markers existed, so the rebuild resumed at the ISO stage only.
+- build19 (exit 0, iso/build19.log, ~19s resume): ISO built.
+- Command-launch footgun (twice): `cd ... && nohup ... > log 2>&1 &`
+  backgrounds the `cd` too (the `&` binds to the whole `&&` chain), so
+  later commands in the same exec call run from /home/hatch and can't
+  see the log — the log appears in the NEXT exec call. Use absolute
+  paths or `cd` again in later commands.
+
+### Step 2 verification — ISO 0.5.4 PROVEN at file level
+- ISO: ~/workspace/vile-os/iso/vile-os-0.5.4-x86_64.iso —
+  1,494,777,856 bytes, sha256
+  7be253524cd223a205ce3ca94f48a5c2b4fa1f6f468ada2ff7742bc107b80414,
+  Volume ID VILE_OS, /arch/version = 0.5.4, MKARCHISO EXIT: 0.
+- Hash chain (full 128-char comparison): ISO .sfs extent (LBA 49858,
+  1,350,541,312 bytes) sha512 = recorded airootfs.sha512 = work-dir
+  .sfs sha512sum =
+  5923c74ca2aa2ab6992693e023e9feea33a177e79511f5ecb8ca599f48d8d41815487e04df637605b3d8817766e6d1c1830d146a3e673a7b49821d0c2eb9cf89.
+  Verified with iso/sfs-check/verify10.py (adapted from verify9.py).
+- .sfs contents (build-env/verify-sfs10.sh, all PASS): md5s of main.c,
+  vile-files.py, vile-setup.py, vile-settings.py, screenfit.py identical
+  to workspace sources; foot logos purple (b0a9a3ec... / e5a2f29d...);
+  banner v0.5.4, meson 0.5.4, Settings "Compositor v0.5.4" + VERSION
+  0.3.0; VILE-README.txt "Vile OS 0.5.4 — live ISO"; vile logos
+  95c3211d... / 4f3be1cc...; new assets files-icon-bare.png f30b26d1...,
+  blur-light 63b41b88...; overlay deleted (vile_load_logo/vile_fit_logo
+  count 0); "Log Out" 4, "Transparent dock" 1; ScreenFit CSS_DARK 3;
+  foot.ini [colors-dark] x3; pam.d/vile present; launchers 755; Files
+  1.2.0; vile-install.sh contains wayland-sessions/vile.desktop;
+  README.md + docs/BUILD_LOG.md present; Hatch certs in ISO trust
+  store: 0 (the CA fix went into the outer build chroot only).
+
+### Step 3 — QEMU boot test "iso7" (first session, Nov 10 ~23:5x EST)
+Launch: qemu-system-x86_64 -m 1024 -smp 2 -vga std -display none
+-monitor unix:build-env/qemu-monitor,server,nowait -cdrom
+iso/vile-os-0.5.4-x86_64.iso -boot d (TCG, PS/2 mouse only).
+Helpers: build-env/shot3.sh, build-env/qemu-ctl.py, build-env/qmouse.py
+(new this session; /tmp copy lost to /tmp ephemerality — the durable
+copy is build-env/qmouse.py; HMP mouse_move/mouse_button).
+Screenshot naming: vile-iso7-boot-NN.png.
+- 01 f9274a43648fa8e2 (720x400): archiso initramfs hooks,
+  /dev/disk/by-label/VILE_OS mounted, loop0 mounted, "Welcome to Arch
+  Linux!" — the 0.5.4 ISO boots.
+- 02 346e8b345bb64bc0 (720x400): "Initial Setup" timezone prompt.
+- 03 dd7867d33a444c0a (1280x800): root autologin, Arch Linux
+  7.2.15-arch1-1 (tty1), [root@archlinux ~]# — byte-identical to the
+  0.5.3 prompt screen (iso6 shot 04).
+- 04 083e338f11d885aa: COMPOSITOR UP — nebula wallpaper, CLEAN, NO Arch
+  logo overlay (overlay deletion proven in the booted ISO); transparent
+  dock (bare icons, no pill): foot, bare ribbon V (Settings), ScreenFit,
+  Files, Setup gear (5th, setup incomplete); bar: NO V tile + "Vile"
+  text (left corner empty), centered bold clock "23:50 Tue 10 Nov",
+  status pill right (Wi-Fi, volume, battery, power); mouse arrow
+  top-left. Wizard had NOT appeared yet (GTK slow under TCG).
+- 05 9ce42d5674565d73: SETUP WIZARD on first boot — "Vile Setup",
+  ribbon V hero, "Welcome to Vile / Your computer, your way. / A few
+  quick questions, then you are in.", 7 step dots (Theme step added),
+  transparent dock, bar with centered clock, no V tile. Wizard bottom
+  buttons partially hidden behind dock/bar at 1280x800 (known; Dell is
+  1920x1080 where they are fully visible).
+- 06 195f40365c533f6b: my click at (915,745) (intended: wizard Next)
+  opened the SYSTEM MENU instead — the menu shows the NEW "Log Out" row
+  (0.5.4 feature proven in the booted ISO): SYSTEM / Wi-Fi Unavailable
+  / Volume [slider] / Battery No battery / Lock / Settings / Log Out /
+  Power Off. Wizard still on step 1. Root cause found later: HMP
+  mouse_move is RELATIVE for the PS/2 mouse, not absolute — the old
+  qmouse.py scaled coords to 0..32767 and sent them as deltas, so the
+  click landed on the status pill (bottom-right). This click is
+  evidence that FIRST-SESSION pointer input reaches the compositor's
+  bar UI in 0.5.4 (the pill responded).
+- 07 be5e9e29cea1c812: click at (640,400) closed the menu (click on the
+  wizard window). Wizard still step 1. Cursor not visible in the shot.
+- 08 be5e9e29cea1c812 (byte-identical to 07): attempted clamp-to-corner
+  fix (mouse_move -32767 -32767 then +640,+400) did NOT move the cursor
+  to center — negative HMP mouse_move deltas are IGNORED by QEMU for
+  the PS/2 mouse (confirmed by three further negative moves). The
+  cursor was stuck at the bottom-right corner.
+- 09 0d1836a446deabcf: relative move (-639,-399) from bottom-right —
+  cursor still not visible (negative ignored). Clock 23:54.
+- 10 5acbd66b198efe7a: relative move (-100,-100) — still no cursor.
+  Bright-pixel analysis of shot 09: no cursor-shaped cluster anywhere
+  (only text glyphs). The cursor was stuck at bottom-right, invisible.
+- 11 bc54279f946f8c13: pressed Enter (ret) on the wizard Welcome step —
+  THE WIZARD VANISHED and the bare desktop appeared with only FOUR
+  dock icons (Setup gear GONE). See "Wizard Enter race" below.
+- 12 dbbe65c20f7d49b4: foot via Super+Enter (meta_l-ret) — banner
+  "VILE OS · v0.5.4" + keybind help lines, NO colors error, prompt
+  [root@archlinux compositor]#. Window has purple focused border,
+  title bar, min/max/close buttons. Dock 4 icons, bar clean.
+- 13 277ac00b06a202f9: `type` garbled a long command (invalid QEMU key
+  names: ~, >, & are not in qemu-ctl.py's keymap, so sendkey dropped
+  them; the 0.5s-per-key cmd() also makes long commands slow). Lesson:
+  only letters/slash/dot/minus are safe with the stock `type`; see
+  qglide2.py / the fixed keymap note below.
+- 14 52e9816a562c14b3: `ls /root/.config/vile` (typed cleanly) ->
+  `setup-done timezone wallpaper wallpapers`. So setup-done EXISTS —
+  the Enter DID complete the wizard via a real path (Skip or Finish).
+  No `theme` file (theme never changed from default dark).
+- iso7 session killed (qemu PID 48167) to start a clean second QEMU
+  boot with correct mouse handling.
+
+### Wizard Enter race (OBSERVED twice, unresolved cause)
+A single Enter keypress on the wizard's Welcome step completed the
+ENTIRE 7-step setup (marker written, Setup gear gone) instead of
+advancing one step. Seen in iso7 (default hold) AND iso7b (50ms hold,
+`sendkey ret 50`). The wizard code (setup/vile-setup.py) advances one
+step per on_continue — there is no multi-step Enter path in the wizard
+itself. Most likely cause: QEMU/TCG delivers the key as HELD (the
+release is delayed under TCG), so the guest's keyboard auto-repeat
+fires ~7 times and the wizard races through all steps to Finish.
+NOT proven to be a wizard bug, NOT proven to be QEMU — needs a
+headless Enter test (the headless harness drives the wizard with
+clicks, not Enter) to settle it. Do NOT treat it as a confirmed wizard
+bug; do NOT treat it as harmless either. The user-facing impact on
+real hardware (a real keyboard) is expected to be nil (a real Enter is
+a single press), but it is unproven until the headless test.
+
+### QEMU mouse notes (iso7/iso7b — read before the next QEMU run)
+- HMP mouse_move is RELATIVE for the PS/2 mouse. Negative deltas are
+  IGNORED by QEMU (three negative moves produced no cursor movement;
+  a -100,0 move DID work later in iso7b — see below — so small
+  negatives work but large ones do not; the PS/2 9-bit range +-255 is
+  the likely boundary).
+- libinput pointer acceleration makes raw relative moves unpredictable:
+  observed factors 0.5x-1.84x for the same kind of move (100 in ->
+  184 out; 200 in -> 246 out; 30 in -> ~18-27 out; slow 8px steps ->
+  ~0.5x). There is NO fixed scale factor. Do NOT dead-reckon.
+- build-env/qmouse.py: rewritten with relative tracking + cursor.pos,
+  but superseded by qglide2.py (below). The old absolute 0..32767
+  scaling is WRONG for the PS/2 mouse — delete that assumption.
+- build-env/qglide2.py (NEW, proven): closed-loop mouse. Every move IS
+  the probe — it screenshots before/after a move and diffs them to
+  find the new cursor (the white arrow), so no move is wasted. glide2()
+  iterates with gain 0.6 toward the target and converges in 3-7
+  iterations (tolerance ~10px). The probe tries (20,0), (-20,0),
+  (0,20), (0,-20) to cope with edge clamping. Caveat: the white arrow
+  is invisible over the LIGHT bar (low contrast) and merges with the
+  bright Arch wallpaper — if the cursor is lost there, move it onto
+  the dark wallpaper first with a raw move (e.g. mouse_move 0 -300).
+  The diff search excludes the clock box (x 550-730, y>=755) so the
+  once-a-minute clock tick does not fake a cursor.
+- qemu-ctl.py `type` keymap is INCOMPLETE: only space, newline, / . -
+  _ = : ; are mapped; ~ > & | * ( ) " ' < > ? [ ] { } \ are NOT (they
+  are sent raw and QEMU drops them). For terminal commands in QEMU,
+  stick to letters/digits/slash/dot/minus/space, or fix the keymap
+  (shift-grave_accent for ~, shift-dot for >, shift-7 for &, etc.).
+- QEMU kill: `pkill -x qemu-system-x86_64` FAILS (name >15 chars).
+  Kill the qemu PID directly (ps -ef | grep qemu-system-x86_64).
+  Killing the wrapper bash does NOT kill the qemu child (it reparents
+  to init). The monitor socket is build-env/qemu-monitor; `info` via
+  qemu-ctl.py confirms "VM status: running".
+
+### Step 3 — QEMU boot test "iso7b" (fresh boot, Nov 11 ~00:0x EST)
+Second QEMU launch (same flags, new log build-env/qemu-iso7b.log).
+Screenshot naming: vile-iso7b-boot-NN.png.
+- 01 3ce892071b429d58 (720x400): systemd booting ([ OK ] lines, a start
+  job for Resource Manager 26s/1min30s — slow TCG boot is normal).
+- 02 07948414b85e8398 (1280x800): "Initial Setup" timezone prompt.
+- 03 dd7867d33a444c0a (1280x800): root autologin — byte-identical to
+  iso7 shot 03 (deterministic prompt screen, kernel 7.2.15).
+- 04 759e2de3d6cec988: wizard up on step 1 (Welcome), 7 dots, ribbon V,
+  transparent dock 5 icons (incl. Setup gear), bar centered clock
+  "00:07 Wed 11 Nov", no V tile. Cursor at top-left (~100,101) —
+  initial cursor position confirmed by pixel measurement.
+- 05 bb28acadc2eea62d: scale test — mouse_move (+200,+200) from
+  (100,101) landed the cursor at (346,347) (factor 1.23x, libinput
+  accel). Cursor tip measured by bright-pixel cluster (bbox 12x20,
+  41 px).
+- 06 1087dbe541ae3c6f: second move (246,47) landed at (797,433)
+  (factor 1.83x). Accel is NOT a fixed factor.
+- 07 210976c6bd95f387: mouse_move (-100,0) moved the cursor
+  (797,433) -> (613,433) (factor 1.84x). Small negative deltas DO work;
+  large negatives (>|255|) do not.
+- 08 628010daa486285b: short-hold Enter (`sendkey ret 50`) on the
+  wizard Welcome step — THE WIZARD COMPLETED AGAIN (same Enter race
+  as iso7). Bare desktop, purple Arch wallpaper (this boot's random
+  pick — the wallpaper's OWN baked-in Arch logo, allowed), dock 4
+  icons (Setup gear gone). This is the second observation of the
+  Enter race.
+- 09 a557157b4c282d15: FIRST-SESSION dock click #1 — glide (old
+  qglide, probe-polluted) clicked at (568,710), on the V icon's left
+  edge. NOTHING opened. (Wait 8s — too short for GTK startup, see
+  the timing note below.)
+- 10 c33985aa2493e7fc: FIRST-SESSION dock click #2 — slow-stepped to
+  (580,708), V icon centre. NOTHING opened (10s wait).
+- 11 0e6eabb8f39b6e9f: FIRST-SESSION dock click #3 — intended foot
+  (520,710), slow steps undershot (factor ~0.5x) and the click landed
+  at (568,710), V left edge again. NOTHING opened (10s wait).
+  Note: the session-1 waits (8-10s) were TOO SHORT to rule out slow
+  GTK startup (Settings takes ~37s to appear — see shot 22). The
+  session-1 dock evidence is therefore suggestive, not conclusive,
+  on its own. The session-2 evidence (shots 39/40) is conclusive.
+- 12 32d570ecd8a951f1: foot via Super+Enter (keyboard) — banner
+  "VILE OS · v0.5.4", no colors error. Keyboard input works fine in
+  session 1; only the DOCK's pointer clicks are dead. (This is the
+  key discriminator: the bug is dock-specific, not a general input
+  failure.)
+- 13 698719bf5dea5848: `pkill -x vile` from foot — compositor killed,
+  back at the tty. The shutdown log is informative: "Vile: first run
+  - building the compositor (about a minute)...", "random default
+  wallpaper '/root/vile-os/wallpapers/vile-purple-arch.jpg' written
+  to hook", libseat "Could not connect to socket /run/seatd.sock"
+  -> "Backend 'seatd' failed to open seat, skipping" -> "Seat opened
+  with backend 'logind'", DRM "Initializing DRM backend for
+  /dev/dri/card0 (bochs-drm)", "Found 1 GPUs", "Found 1 DRM CRTCs",
+  EGL "Software rendering detected..." -> "Failed to initialize EGL
+  context" -> "Could not initialize EGL" -> "Creating pixman
+  renderer" (software fallback, expected in QEMU), wallpaper decoded
+  1920x1080, "pointer device connected", "Found connector
+  'Virtual-1'", modes incl. 1280x800 @ 74.994 Hz (preferred).
+- 14 64a82e53479bb71f: SESSION 2 up (ran `vile` again) — bare desktop,
+  purple Arch wallpaper, transparent dock 4 icons, bar centered clock
+  "00:16 Wed 11 Nov", no V tile, no wizard (marker exists). Cursor
+  reset to top-left (~100,105).
+- 15 750b313a521cb2a1: SECOND-SESSION dock click #1 — qglide2
+  converged in 4 iterations and clicked ON TARGET (580,716), V icon.
+  NOTHING opened (10s wait).
+- 16 750b313a521cb2a1 (byte-identical to 15): +25s wait (35s total
+  since the click) — STILL NOTHING. (Borderline: the menu-Settings
+  launch later took ~37s, so 35s was just short. The 70s tests in
+  shots 39/40 settle it.)
+- 17 6ba7cd144ae11c65: pill-click attempt — glide lost the cursor
+  (the step_measure diff excluded y>750, and the pill is at y~775).
+  Click fired at (783,768), near the Files icon — no menu. (Test
+  inconclusive; the diff exclusion was the bug. Fixed in qglide2.py:
+  the search now covers the full frame except the clock box.)
+- 18 ea36fb0f0b78a967: PILL CLICK WORKS in session 2 — on-target click
+  at (1259,776) opened the SYSTEM MENU: SYSTEM / Wi-Fi Unavailable /
+  Volume [slider] / Battery No battery / Lock / Settings / Log Out /
+  Power Off. Cursor on the pill. Proves mouse_button events reach the
+  compositor and the BAR responds in session 2.
+- 19 d1231a039b213f9b: clicked the pill again (cursor was already on
+  it) — menu toggled CLOSED. Bare desktop.
+- 20 3abd0a71c84c6627: pill click reopened the menu (same items, Log
+  Out present). Cursor on the pill.
+- 21 b2e2beb88fb3c27c: clicked the menu's "Settings" row ON TARGET
+  (1021,635) — menu closed, no Settings window yet (12s wait).
+- 22 22f98658da0216f7: SETTINGS OPEN (~37s after the menu click —
+  GTK startup under TCG is SLOW; this is the timing baseline that
+  makes the 35s dock wait borderline and the 70s waits decisive).
+  Settings window (light theme already? No — this shot is DARK):
+  "Settings" title, Profile Picture section (purple circle "v",
+  name "root", "Shown on the lock screen and in Settings...",
+  Change Picture... / Remove Picture), Theme section: Dark card
+  ("Dark surfaces, light text — the Vile look", "✓ Current",
+  selected) + Light card ("Lavender-white surfaces, dark text").
+  V dock icon has a running dot. Window tiled above the dock.
+- 23 b13557f4994c6828: THEME SWITCH DARK -> LIGHT PROVEN — clicked
+  the Light card on-target (640,579). Settings restyled LIVE to
+  light (white/lavender-white background, dark text; Light card now
+  "✓ Current", Dark unselected). The compositor BAR also switched to
+  light (lavender-grey bar, dark clock "00:21 Wed 11 Nov", dark
+  status-pill icons). The theme file was written (Light is Current).
+- 24 864cee9b59ce7026: scrolled down in Settings (Page Down x2) —
+  SYSTEM MONITOR 0.3.0 VISIBLE (light theme): Wallpaper section
+  (Dunes 1920x1080, "Vile picks it up within a second while it is
+  running; otherwise it applies at next start."), System section:
+  CPU card "QEMU Virtual version 2.5+ @ 1.49GHz" (real CPU detection),
+  Usage 18%, "— CPU temperature" (no sensor in QEMU — honest),
+  Storage 7.4 MiB, Network, Memory 369.7 MiB.
+- 25 859025e7df2ddcb6: scrolled further — Storage 7.4 MiB of 256.0
+  MiB (3%), Network Download/Upload/Total all "—" (no traffic —
+  honest), Memory 367.8 MiB of 952.3 MiB (39%), GPU "Device
+  1234:1111 (rev 02)" (the real QEMU bochs VGA PCI ID — detection
+  works, not a fake name), Usage "—". About: "Vile OS • Settings
+  0.3.0 / Compositor v0.5.4 • wlroots 0.19.3 • Wayland / Built from
+  scratch on pure Arch — no Hyprland." + "Go through the first-run
+  setup again" + "Run Setup again" button.
+- 26 75707ff22d769da3: tried to click "Run Setup again" (1158,600) —
+  glide lost the cursor (long move, accel variance), click missed,
+  no wizard. Settings still on the About page.
+- 27 d9f5bdb051f0be96: foot via Super+Enter (tiled right, master-stack
+  split with Settings left). Ran `../setup/vile-setup --step 3`.
+  Terminal is DARK (foot.ini fixed dark config — expected; foot does
+  not follow the theme) while Settings (left) is LIGHT. Banner
+  "VILE OS · v0.5.4" visible.
+- 28 7c31f6febb90c506: wizard opened via --step 3 — BUT dots show 4
+  filled + 3 hollow (step 3 = Theme) while the CONTENT is "Welcome to
+  Vile" (step 1). See "--step mismatch" below. Wizard is in LIGHT
+  theme (white bg, dark text) — the wizard follows the theme.
+  Windows tiled: Settings left, foot top-right, wizard bottom-right.
+- 29 7c31f6febb90c506 (byte-identical to 28): +12s — content still
+  Welcome. NOT rendering lag; it is a real state mismatch.
+- 30 f0ca9e44d8dc086a: wizard fullscreened (Windows+F) — light theme,
+  dots 4 filled, content Welcome, buttons Back / Skip setup /
+  Continue (purple, at ~(1015,745)) now fully visible.
+- 31 883a425371e4eaea: closed the --step wizard with Super+Q.
+  Settings + foot tiled again, foot focused, fresh prompt.
+- 32 bbf844b83343d6e6: ran `../setup/vile-setup` (NO --step) — fresh
+  wizard opened on step 1 (Welcome) with CONSISTENT dots (only the
+  first filled). Light theme, tiled bottom-right.
+- 33 4a4dae47f10e9dd4: wizard fullscreened (Windows+F) — step 1,
+  1 dot filled, Continue at (1015,745).
+- 34 3cad325e91874cf2: clicked Continue — glide lost the cursor
+  (started at the right edge 1270,621), click missed, wizard still
+  on step 1. The wizard Theme step was NOT reached by clicking in
+  this session (mouse unreliability, not a wizard failure).
+- 35 acba8fb8c9309244: closed the wizard AND foot with Super+Q x2.
+  Settings alone, fullscreen-ish, System monitor + About (light).
+  Memory live-updating (380.2 MiB now).
+- 36 311fd6bb3b765b71: closed Settings with Super+Q. Bare desktop.
+  Attempted a dock-V click but glide2 "cannot locate cursor" (the
+  cursor was on the LIGHT bar at (725,795), where the white arrow is
+  invisible). Click fired at an unknown spot; no Settings after 60s.
+  Test INCONCLUSIVE (click did not land on the V icon).
+- 37 3ae3e46026f43e93: same attempt, glide2 again could not locate
+  the cursor (still on the light bar). Inconclusive.
+- 38 662198a202c1f2f2: raw move mouse_move 0 -300 moved the cursor
+  off the bar onto the dark wallpaper at (725,375) (visible again).
+- 39 86e6fea28c6e031c: DEFINITIVE dock-V test — qglide2 converged
+  (768,349 -> 665,526 -> 571,726 -> 576,717) and clicked ON TARGET
+  (576,717), V icon. Waited 70s (well past the ~37s GTK startup).
+  NOTHING opened. Cursor visible on the V icon in the shot. This
+  settles it: the dock-V click does not launch Settings in 0.5.4
+  session 2.
+- 40 1feadc0ba6767a2f: DEFINITIVE dock-Files test — qglide2 converged
+  in 7 iterations to ON TARGET (709,709), Files icon. Waited 70s.
+  NOTHING opened. Cursor on the Files icon (with hover outline) in
+  the shot. The dock-Files click does not launch Files either.
+- 41 c6558be2110b1a88: FILES APP PROVEN (via terminal, not the dock)
+  — ran `../filemanager/vile-files` from foot. Files opened (light
+  theme): sidebar Home (selected) / Desktop / Documents / Downloads
+  / Pictures / Music / Videos / This PC; icon grid Desktop, Documents,
+  Downloads, Music, Pictures, Videos, vile-os (folder),
+  VILE-README.txt (2.7 KB, 2026-11-10 23:08); top bar back/forward/up,
+  "root", Hidden, List, New Folder, X; search "Search this folder...";
+  status "8 items • 248.6 MB free of 256.0 MB on /". Files dock icon
+  shows a running dot. Tiled next to foot (banner visible).
+
+### --step mismatch (MINOR, test-path only)
+`vile-setup --step 3` shows 4 dots filled (step 3 = Theme) but the
+Welcome page content. Code: __init__ line 317 calls
+show_step(max(0, min(start_step, 6))); show_step (line 600) calls
+self.stack.set_visible_child_name(names[n]). Likely cause: show_step
+runs before the stack pages are built (the "theme" child does not
+exist yet when set_visible_child_name("theme") is called, so it
+no-ops and the stack shows the first page, Welcome), while the dots
+are set from self.step (=3) and do show 3. --step is a TEST-ONLY flag
+(the compositor launches the wizard without it; users click Next from
+Welcome), so this is not user-facing. The normal path (fresh wizard,
+no --step) shows consistent dots + content (shot 32/33). Fix: build
+the stack pages before calling show_step, or re-assert the visible
+child after the build. Not fixed here (out of scope for the ISO task).
+
+### REGRESSION — the 0.5.4 transparent dock does NOT respond to clicks
+DEFINITIVE (session 2, iso7b): on-target click on the V dock icon
+(576,717), 70s wait — nothing. On-target click on the Files dock icon
+(709,709), 70s wait — nothing. The same clicks in 0.5.3 (iso6,
+session 2) DID open Settings and Files. The bar pill clicks DO work
+(menu opens/closes, both sessions). The menu's Settings row DOES
+launch Settings (~37s). Keyboard Super+Enter DOES open foot. The
+Settings and Files apps themselves DO work (proven via menu and via
+terminal). So the failure is SPECIFIC to the dock's pointer-click
+handling in 0.5.4, in BOTH sessions (session 1: 3 clicks on/near V,
+nothing — though those waits were 8-10s, too short to be conclusive
+alone; session 2 is conclusive). Most likely cause: the 0.5.4
+transparent-dock rework — when the pill background was removed, the
+dock layer-shell surface's INPUT REGION may have been left empty (or
+tied to the old pill rect), so pointer events fall through to the
+wallpaper. The dock's app-tracking still works (the running dot
+appears under V and Files when those apps run). This is a SHIP-BLOCKER:
+the dock is the primary app launcher; on the Dell, Adnan would not be
+able to open Settings/Files/ScreenFit by clicking the dock. The fix
+belongs in main.c (dock input region) and needs a rebuild + re-test.
+NOT fixed here (the ISO task forbids editing main.c except for build
+breaks). CONSEQUENCE: 0.5.3 is KEPT on disk (see below) — 0.5.4 is not
+a clean superset of 0.5.3, so it does not supersede it yet.
+
+### 0.5.4 — what is PROVEN in the booted ISO (read every shot by eye)
+- ISO boots (archiso hooks, VILE_OS mounted, loop0, systemd, timezone
+  prompt, root autologin, kernel 7.2.15). Deterministic prompt screen
+  (byte-identical across two boots).
+- Compositor starts (`vile`), DRM bochs-drm, pixman software fallback
+  (EGL fails in QEMU — expected), wallpaper decoded 1920x1080.
+- Setup wizard on first boot (7 steps, Theme step present in the step
+  list; Welcome page + dots proven; the Theme STEP PAGE itself was NOT
+  reached by clicking in QEMU — the --step path shows a dots/content
+  mismatch, and the Continue-click walk was blocked by mouse
+  unreliability. The Theme step's code + headless test (12/12) stand,
+  and the Settings Theme section + live theme switch are proven, so
+  the theme machinery is proven; the wizard's Theme PAGE in the ISO
+  is the one remaining unproven UI surface).
+- Bare desktop: nebula (iso7) and purple Arch (iso7b) wallpapers, both
+  CLEAN — NO logo overlay anywhere (overlay deletion proven). The Arch
+  wallpaper shows its OWN baked-in logo (allowed).
+- Transparent dock: bare icons, no pill (proven in both boots, both
+  wallpapers). Setup gear shows while setup is incomplete and goes
+  away once setup is done (proven: gear present in shot 04/05, gone
+  after the wizard completed in shot 11/12 and in iso7b).
+- Bar: NO V tile + "Vile" text (left corner empty, both boots);
+  centered bold clock; status pill (Wi-Fi, volume, battery, power).
+  Bar follows the theme (dark in shot 22, light in shot 23+).
+- Foot banner "VILE OS · v0.5.4" + keybind help, NO colors error
+  (proven twice, iso7 shot 12 and iso7b shot 12/27/31).
+- System menu opens from the bar pill (both sessions) and shows the
+  NEW "Log Out" row (proven iso7 shot 06, iso7b shot 18/20).
+- Settings opens from the system menu's Settings row (~37s GTK
+  startup under TCG) and shows: Profile Picture (root, purple "v"
+  avatar), Theme section (Dark ✓ Current / Light), Wallpaper
+  section (Dunes), System monitor 0.3.0 (real CPU "QEMU Virtual
+  version 2.5+ @ 1.49GHz", 18% usage, "—" temperature; Storage 7.4
+  MiB of 256.0 MiB; Network all "—"; Memory ~368-380 MiB of 952.3
+  MiB, live-updating; GPU "Device 1234:1111 (rev 02)", Usage "—"),
+  About ("Vile OS • Settings 0.3.0 / Compositor v0.5.4 • wlroots
+  0.19.3 • Wayland / Built from scratch on pure Arch — no
+  Hyprland."). Settings 0.3.0 + Compositor v0.5.4 version strings
+  proven in the booted ISO.
+- Theme switch dark -> light LIVE (Settings Light card click): the
+  Settings window AND the compositor bar restyled to light; Light
+  became "✓ Current". The wizard also follows the light theme.
+- Files app works (v1.2, light theme, real home contents, status bar
+  with free space) — launched from a terminal, NOT from the dock.
+- Window tiling works (master-stack: Settings + foot + wizard tiled
+  side by side; fullscreen via Windows+F works; Super+Q closes the
+  focused window; Super+Enter opens foot).
+
+### 0.5.4 — what is NOT proven / broken in the booted ISO
+- DOCK CLICKS DO NOTHING (regression, ship-blocker — see above).
+  Settings and Files were proven via the menu / terminal, NOT via
+  the dock. The task's "Settings opening from a real dock click" and
+  "Files opening from a real dock click" requirements are NOT met.
+- Wizard Theme PAGE not reached by clicking in QEMU (see above).
+- Window drag / minimize / maximize NOT tested in QEMU (the queue
+  agent proved drag 40/40 + dock 14/14 + regression 13/13 headless;
+  QEMU mouse unreliability blocked a live drag test). Min/max buttons
+  are visible on window title bars (proven in shots 12/27/31).
+- ScreenFit NOT opened in QEMU (its dock icon is present; the app was
+  proven dark-mode in the headless queue-agent run, not in the ISO
+  boot). The ScreenFit dock icon click would hit the same dock bug.
+- Lock screen (Windows+L) NOT tested in the ISO boot. Log Out /
+  Power Off rows are visible in the menu but were never clicked (the
+  parent forbids clicking them in tests — they would end the session).
+- The wizard Enter race (see above) — likely a QEMU/TCG artifact,
+  needs a headless Enter test to settle.
+- Real-hardware gate (Dell) — everything Dell-side remains unproven
+  (see the standing "Still open / unproven" list in the task brief).
+
+### Decision — 0.5.3 ISO KEPT (do NOT delete yet)
+iso/vile-os-0.5.3-x86_64.iso (1,493,336,064 bytes, sha a8c7d253...)
+is KEPT on disk. The task said to delete it once 0.5.4 is proven, but
+0.5.4 is NOT fully proven: its dock clicks are dead (a regression vs
+0.5.3, whose session-2 dock clicks worked). 0.5.4 is therefore not a
+clean superset of 0.5.3 and must not supersede it as the ship
+candidate until the dock input region is fixed and re-tested. Delete
+0.5.3 only after a fixed 0.5.4 (or 0.5.5) re-proves dock clicks in
+QEMU. The parent / Adnan decides the fix priority.
+ISO 0.5.4 remains at iso/vile-os-0.5.4-x86_64.iso (1,494,777,856
+bytes, sha256 7be253524cd223a205ce3ca94f48a5c2b4fa1f6f468ada2ff7742bc107b80414).
+
+### Tools left behind for the next QEMU run
+- build-env/qglide2.py — closed-loop mouse (diff-based cursor
+  location, gain-0.6 glide, multi-direction probe). Use it, not
+  qmouse.py (absolute scaling is wrong for the PS/2 mouse).
+- build-env/qmouse.py — rewritten with relative tracking; superseded
+  by qglide2.py but kept for reference.
+- build-env/cursor.pos — stale (records a qmouse target, not the real
+  cursor). Ignore it; qglide2 measures the real cursor each time.
+- Screenshots: screenshots/vile-iso7-boot-*.png (14 shots, first QEMU
+  session) and screenshots/vile-iso7b-boot-*.png (41 shots, second
+  QEMU session). All read by eye; shas in the tables above.
+- QEMU log: build-env/qemu-iso7.log (first session), build-env/qemu-iso7b.log (second session).
+### Current screenshot shas — 2026-11-11 00:36 UTC
+
+Produced by: ISO 0.5.4 QEMU boot tests iso7 + iso7b (Nov 10-11, 2026) — vile-iso7-boot-*.png (14) + vile-iso7b-boot-*.png (41)
+
+| File | sha256 (first 8 … last 4) |
+|---|---|
+| `vile-anim-close-after.png` | `acd2ac1f…6011` |
+| `vile-anim-close-mid.png` | `5079ebef…e6bb` |
+| `vile-anim-dock-hover.png` | `778da18e…7250` |
+| `vile-anim-lock-mid.png` | `e6d46b27…246e` |
+| `vile-anim-menu-after.png` | `4c889724…dc82` |
+| `vile-anim-menu-mid.png` | `60b7c4e7…36d7` |
+| `vile-anim-startup-mid.png` | `355b7d30…b6a5` |
+| `vile-anim-unlock-after.png` | `acd2ac1f…6011` |
+| `vile-anim-unlock-mid.png` | `60c37c87…322b` |
+| `vile-anim-window-after.png` | `778da18e…7250` |
+| `vile-anim-window-mid.png` | `778da18e…7250` |
+| `vile-banner-01.png` | `4a0ea8a9…a51d` |
+| `vile-banner-02.png` | `31448f20…5c5c` |
+| `vile-bar-01-bare.png` | `e0ca4797…740c` |
+| `vile-bar-logo-zoom.png` | `870c30f5…57e0` |
+| `vile-bar-nebula.png` | `57d7dfa8…e0fc` |
+| `vile-bar-zoom.png` | `527f81d6…c220` |
+| `vile-dock-01-bare.png` | `fdab4241…6336` |
+| `vile-dock-02-reorder.png` | `f130d538…2042` |
+| `vile-dock-03-unpin.png` | `b1e20363…9ac2` |
+| `vile-dock-04-unpinned.png` | `592cc0a6…8488` |
+| `vile-dock-05-setupgone.png` | `c4c7cf42…956f` |
+| `vile-dock-06-bar.png` | `c4c7cf42…956f` |
+| `vile-dock-07-menu.png` | `8e47a04e…2bf5` |
+| `vile-dock-08-nebula.png` | `c4c7cf42…956f` |
+| `vile-dock-files-01.png` | `b7810168…bd8c` |
+| `vile-dock-files-02.png` | `d7938083…71b5` |
+| `vile-dock-files-03-hover.png` | `005e33fd…4847` |
+| `vile-dock-files-03-ungrown.png` | `a0350806…0964` |
+| `vile-drag-00-bare.png` | `22b986e2…e4c3` |
+| `vile-drag-00-dock.png` | `e93e685b…2292` |
+| `vile-drag-01-fullscreen.png` | `05e45763…2913` |
+| `vile-drag-02-mid.png` | `7cadc212…7feb` |
+| `vile-drag-03-dropped.png` | `7cadc212…7feb` |
+| `vile-drag-04-superdrag.png` | `317fae76…23cc` |
+| `vile-drag-04b-superrdrag.png` | `2d6cc1f0…20f0` |
+| `vile-drag-05-resized.png` | `b66293ea…929b` |
+| `vile-drag-06-maximized.png` | `0bfce179…e64b` |
+| `vile-drag-07-minimized.png` | `adb6b223…1967` |
+| `vile-drag-08-restored.png` | `a638df41…4831` |
+| `vile-drag-09-menu.png` | `bdc64141…0a54` |
+| `vile-drag-10-blur.png` | `eded6af4…1fca` |
+| `vile-drag-11-nebula.png` | `f3fdf273…f9bd` |
+| `vile-explore-foot.png` | `81641c79…c493` |
+| `vile-files-01.png` | `3e31ac68…53c3` |
+| `vile-files-02.png` | `c43f2335…c287` |
+| `vile-files-03.png` | `221cce9c…8b90` |
+| `vile-files-04-dialog.png` | `db20f7e4…efa5` |
+| `vile-files-04.png` | `c20d3ac2…7969` |
+| `vile-files-05.png` | `0fc9e2e3…eb12` |
+| `vile-files-11-devices.png` | `63cafb92…b101` |
+| `vile-files-11-drive-added.png` | `d62ae980…43e6` |
+| `vile-files-11-drive-open.png` | `8e8490f5…3243` |
+| `vile-files-11-drive-removed.png` | `6d7391e4…680c` |
+| `vile-files-11-probe.png` | `9b652eda…e39e` |
+| `vile-files-11-sidebar.png` | `586e7250…792b` |
+| `vile-files-12-bundle-zip.png` | `900b27d6…cba2` |
+| `vile-files-12-error-corrupt.png` | `16d592ad…a536` |
+| `vile-files-12-error-locked.png` | `58ff1b00…d026` |
+| `vile-files-12-extract-to-done.png` | `88acb60a…5494` |
+| `vile-files-12-extract-to.png` | `4c753f72…885a` |
+| `vile-files-12-extracted.png` | `ca05750f…29da` |
+| `vile-files-12-menu-folder.png` | `13d9686c…f18b` |
+| `vile-files-12-menu-multi.png` | `bee68b90…be3e` |
+| `vile-files-12-menu-zip.png` | `c66b7f2c…bc19` |
+| `vile-files-12-name-dialog.png` | `93deed7a…82bd` |
+| `vile-files-12-pack-zip.png` | `417f3cf4…1adb` |
+| `vile-files-12-progress.png` | `f8fc4b75…8002` |
+| `vile-files-13-probe.png` | `8774424a…8fc3` |
+| `vile-files-13-rename.png` | `0407a7a0…10de` |
+| `vile-files-13-renamed.png` | `61432e7f…4921` |
+| `vile-files-13-trash.png` | `1022c64b…a9aa` |
+| `vile-files-13-trashed.png` | `c8d1d17e…caa3` |
+| `vile-input-01.png` | `85b4b679…0a5f` |
+| `vile-input-02-closed.png` | `85b4b679…0a5f` |
+| `vile-input-02-escaped.png` | `776e9078…509b` |
+| `vile-input-02-nofocus.png` | `bf8aae49…baec` |
+| `vile-input-02-open.png` | `ea0c6147…79f6` |
+| `vile-input-02-refocus.png` | `9da37b6a…5873` |
+| `vile-input-02.png` | `de339835…3f28` |
+| `vile-input-03-unlocked.png` | `a85b22e5…d955` |
+| `vile-input-03.png` | `386117ce…3aa8` |
+| `vile-iso-boot-01.png` | `8110e773…e454` |
+| `vile-iso-boot-02.png` | `1e817616…776b` |
+| `vile-iso-boot-03.png` | `58983643…f69b` |
+| `vile-iso-boot-04.png` | `21a85a30…8593` |
+| `vile-iso-boot-05.png` | `6fe9677a…4010` |
+| `vile-iso-boot-06.png` | `c40bc7b2…3038` |
+| `vile-iso-boot-07.png` | `2736153b…07d9` |
+| `vile-iso-boot-08.png` | `f353949f…438c` |
+| `vile-iso-boot-09.png` | `71818b78…2ef1` |
+| `vile-iso-boot-10.png` | `7e06ac12…2755` |
+| `vile-iso2-boot-01.png` | `4ad1b1a1…a1fd` |
+| `vile-iso2-boot-02.png` | `07948414…f079` |
+| `vile-iso2-boot-03.png` | `8327432c…f32c` |
+| `vile-iso2-boot-04.png` | `22ea52db…ea25` |
+| `vile-iso2-boot-05.png` | `40db1b9b…b6e1` |
+| `vile-iso3-boot-01.png` | `44b6ba0e…df01` |
+| `vile-iso3-boot-02.png` | `07948414…f079` |
+| `vile-iso3-boot-03.png` | `6fe9677a…4010` |
+| `vile-iso3-boot-04.png` | `84483650…0870` |
+| `vile-iso3-boot-05.png` | `68c50222…fac2` |
+| `vile-iso3-boot-06.png` | `899a33a2…4385` |
+| `vile-iso3-boot-07.png` | `11f79308…dec6` |
+| `vile-iso3-boot-08.png` | `dd34912c…b34c` |
+| `vile-iso3-boot-09.png` | `4c2d06ef…559a` |
+| `vile-iso3-boot-10.png` | `07948414…f079` |
+| `vile-iso3-boot-10b.png` | `6fe9677a…4010` |
+| `vile-iso3-boot-11.png` | `be91db44…edd4` |
+| `vile-iso3-boot-12.png` | `540ce71b…3bf4` |
+| `vile-iso3-boot-13.png` | `8e43d1a4…1dee` |
+| `vile-iso3-boot-14.png` | `0eef67d8…bf09` |
+| `vile-iso4-boot-01.png` | `c7c8e84a…4a9f` |
+| `vile-iso4-boot-02.png` | `a4b739fd…0ad1` |
+| `vile-iso4-boot-03.png` | `58983643…f69b` |
+| `vile-iso4-boot-04.png` | `21a85a30…8593` |
+| `vile-iso4-boot-05.png` | `5ec54a69…0ec3` |
+| `vile-iso5-arrow35-zoom.png` | `2d9d5df3…f075` |
+| `vile-iso5-boot-01.png` | `7f897e03…dbd1` |
+| `vile-iso5-boot-02.png` | `07948414…f079` |
+| `vile-iso5-boot-03.png` | `47d63618…9801` |
+| `vile-iso5-boot-04.png` | `01732892…75ee` |
+| `vile-iso5-boot-05.png` | `063370cd…17a7` |
+| `vile-iso5-boot-06.png` | `850bf0b7…c143` |
+| `vile-iso5-boot-07.png` | `26ff3867…07be` |
+| `vile-iso5-boot-08.png` | `994802ce…5a1a` |
+| `vile-iso5-boot-09.png` | `1b06a0b9…37c7` |
+| `vile-iso5-boot-10.png` | `a7d21623…1638` |
+| `vile-iso5-boot-11.png` | `4ed5e290…7897` |
+| `vile-iso5-boot-12.png` | `630f58bb…08ef` |
+| `vile-iso5-boot-13.png` | `630f58bb…08ef` |
+| `vile-iso5-boot-14.png` | `3a701804…25b4` |
+| `vile-iso5-boot-15.png` | `1561cc67…dbfa` |
+| `vile-iso5-boot-16.png` | `93ae09da…a028` |
+| `vile-iso5-boot-17.png` | `bde8e33c…992e` |
+| `vile-iso5-boot-18.png` | `4c86d4e3…ff21` |
+| `vile-iso5-boot-19.png` | `102ed567…3b0e` |
+| `vile-iso5-boot-20.png` | `ec21562e…43bd` |
+| `vile-iso5-boot-21.png` | `6cebb668…95dd` |
+| `vile-iso5-boot-22.png` | `e60b18ca…3937` |
+| `vile-iso5-boot-23.png` | `450db866…1963` |
+| `vile-iso5-boot-24.png` | `172ac880…8a01` |
+| `vile-iso5-boot-25.png` | `9caedc0e…c764` |
+| `vile-iso5-boot-26.png` | `d4449af2…c869` |
+| `vile-iso5-boot-27.png` | `828b2332…3d28` |
+| `vile-iso5-boot-28.png` | `b693e066…000d` |
+| `vile-iso5-boot-29.png` | `88f24abf…80eb` |
+| `vile-iso5-boot-30.png` | `88f24abf…80eb` |
+| `vile-iso5-boot-31.png` | `fc6c0f9b…a92b` |
+| `vile-iso5-boot-32.png` | `3a4342d9…9d29` |
+| `vile-iso5-boot-33.png` | `3e445ff3…168d` |
+| `vile-iso5-boot-34.png` | `3fc809fe…878b` |
+| `vile-iso5-boot-35.png` | `7e172f1c…8373` |
+| `vile-iso5-boot-36.png` | `b50c94e7…1be8` |
+| `vile-iso5-boot-37.png` | `d021570b…6940` |
+| `vile-iso5-boot-38.png` | `47e0e38b…02a7` |
+| `vile-iso5-boot-39.png` | `8ffe311f…cdfd` |
+| `vile-iso5-boot-40.png` | `0979fa7d…83f7` |
+| `vile-iso5-boot-41.png` | `0f150522…e739` |
+| `vile-iso5-boot-42.png` | `5cd25624…9964` |
+| `vile-iso5-boot-43.png` | `407e8cb6…5860` |
+| `vile-iso5-boot-44.png` | `fa369114…eeef` |
+| `vile-iso5-boot-45.png` | `34afdf7a…c7d5` |
+| `vile-iso5-dock-zoom.png` | `9c87efe8…babb` |
+| `vile-iso5-dock32-zoom.png` | `ff70ff13…c8cb` |
+| `vile-iso5-dock33-zoom.png` | `ff70ff13…c8cb` |
+| `vile-iso5-dock34-zoom.png` | `91997dbd…83f6` |
+| `vile-iso6-boot-01.png` | `4e43bebc…f27e` |
+| `vile-iso6-boot-02.png` | `d0a4d0b8…795c` |
+| `vile-iso6-boot-03.png` | `58983643…f69b` |
+| `vile-iso6-boot-04.png` | `dd7867d3…9ef6` |
+| `vile-iso6-boot-05.png` | `05713dba…bd53` |
+| `vile-iso6-boot-06.png` | `f7efb5e2…c90b` |
+| `vile-iso6-boot-07.png` | `7814599d…2a4b` |
+| `vile-iso6-boot-08.png` | `b62234bb…bca8` |
+| `vile-iso6-boot-09.png` | `278216fb…6f54` |
+| `vile-iso6-boot-10.png` | `81be8330…6533` |
+| `vile-iso6-boot-11.png` | `e921d323…e9ea` |
+| `vile-iso6-boot-12.png` | `ed38fde7…ecb8` |
+| `vile-iso6-boot-13.png` | `de920377…2b90` |
+| `vile-iso6-boot-14.png` | `de920377…2b90` |
+| `vile-iso6-boot-15.png` | `9f78c816…dfa7` |
+| `vile-iso6-boot-16.png` | `9f78c816…dfa7` |
+| `vile-iso6-boot-17.png` | `e7769d62…c1f7` |
+| `vile-iso6-boot-18.png` | `574fa5f1…3abd` |
+| `vile-iso6-boot-19.png` | `7f837958…74e4` |
+| `vile-iso6-boot-20.png` | `7f837958…74e4` |
+| `vile-iso6-boot-21.png` | `0ed17d31…825d` |
+| `vile-iso6-boot-22.png` | `0ed17d31…825d` |
+| `vile-iso6-boot-23.png` | `beecbc07…732a` |
+| `vile-iso6-boot-24.png` | `c5a1c43b…996e` |
+| `vile-iso6-boot-25.png` | `cb13dee9…6bc9` |
+| `vile-iso6-boot-26.png` | `c5b08965…b83a` |
+| `vile-iso6-boot-27.png` | `05d90491…2fff` |
+| `vile-iso6-boot-28.png` | `4960e730…581f` |
+| `vile-iso6-boot-29.png` | `3825b365…3178` |
+| `vile-iso6-boot-30.png` | `f257b73f…41ee` |
+| `vile-iso6-boot-31.png` | `d84ebc6b…9394` |
+| `vile-iso6-boot-32.png` | `2ee5e7d4…52a8` |
+| `vile-iso6-boot-33.png` | `53c8d4ad…37ea` |
+| `vile-iso6-boot-34.png` | `ffbf7cd3…7336` |
+| `vile-iso6-boot-35.png` | `98b94f6e…f77f` |
+| `vile-iso6-boot-36.png` | `e66b03fd…5bc3` |
+| `vile-iso6-boot-37.png` | `11f3c2ad…61c6` |
+| `vile-iso6-boot-38.png` | `42ad74ce…7dae` |
+| `vile-iso6-boot-39.png` | `0f9c36f1…010d` |
+| `vile-iso6-boot-40.png` | `f79cc98d…6d3e` |
+| `vile-iso7-boot-01.png` | `f9274a43…5d27` |
+| `vile-iso7-boot-02.png` | `346e8b34…2fa5` |
+| `vile-iso7-boot-03.png` | `dd7867d3…9ef6` |
+| `vile-iso7-boot-04.png` | `083e338f…4446` |
+| `vile-iso7-boot-05.png` | `9ce42d56…61c7` |
+| `vile-iso7-boot-06.png` | `195f4036…3269` |
+| `vile-iso7-boot-07.png` | `be5e9e29…7952` |
+| `vile-iso7-boot-08.png` | `be5e9e29…7952` |
+| `vile-iso7-boot-09.png` | `0d1836a4…9db2` |
+| `vile-iso7-boot-10.png` | `5acbd66b…8780` |
+| `vile-iso7-boot-11.png` | `bc54279f…c79c` |
+| `vile-iso7-boot-12.png` | `dbbe65c2…d47c` |
+| `vile-iso7-boot-13.png` | `277ac00b…6e53` |
+| `vile-iso7-boot-14.png` | `52e9816a…e57f` |
+| `vile-iso7b-boot-01.png` | `3ce89207…7496` |
+| `vile-iso7b-boot-02.png` | `07948414…f079` |
+| `vile-iso7b-boot-03.png` | `dd7867d3…9ef6` |
+| `vile-iso7b-boot-04.png` | `759e2de3…1e03` |
+| `vile-iso7b-boot-05.png` | `bb28acad…267e` |
+| `vile-iso7b-boot-06.png` | `1087dbe5…0c24` |
+| `vile-iso7b-boot-07.png` | `210976c6…0ad9` |
+| `vile-iso7b-boot-08.png` | `628010da…096b` |
+| `vile-iso7b-boot-09.png` | `a557157b…cdef` |
+| `vile-iso7b-boot-10.png` | `c33985aa…eba6` |
+| `vile-iso7b-boot-11.png` | `0e6eabb8…2eb6` |
+| `vile-iso7b-boot-12.png` | `32d570ec…a9ad` |
+| `vile-iso7b-boot-13.png` | `698719bf…609a` |
+| `vile-iso7b-boot-14.png` | `64a82e53…889a` |
+| `vile-iso7b-boot-15.png` | `750b313a…0446` |
+| `vile-iso7b-boot-16.png` | `750b313a…0446` |
+| `vile-iso7b-boot-17.png` | `6ba7cd14…f478` |
+| `vile-iso7b-boot-18.png` | `ea36fb0f…48a6` |
+| `vile-iso7b-boot-19.png` | `d1231a03…0e5f` |
+| `vile-iso7b-boot-20.png` | `3abd0a71…ff96` |
+| `vile-iso7b-boot-21.png` | `b2e2beb8…7675` |
+| `vile-iso7b-boot-22.png` | `22f98658…f786` |
+| `vile-iso7b-boot-23.png` | `b13557f4…e7cf` |
+| `vile-iso7b-boot-24.png` | `864cee9b…0e98` |
+| `vile-iso7b-boot-25.png` | `859025e7…df36` |
+| `vile-iso7b-boot-26.png` | `75707ff2…4197` |
+| `vile-iso7b-boot-27.png` | `d9f5bdb0…7b91` |
+| `vile-iso7b-boot-28.png` | `7c31f6fe…b9ee` |
+| `vile-iso7b-boot-29.png` | `7c31f6fe…b9ee` |
+| `vile-iso7b-boot-30.png` | `f0ca9e44…d8d0` |
+| `vile-iso7b-boot-31.png` | `883a4253…2a05` |
+| `vile-iso7b-boot-32.png` | `bbf844b8…20d2` |
+| `vile-iso7b-boot-33.png` | `4a4dae47…d9a3` |
+| `vile-iso7b-boot-34.png` | `3cad325e…bfb0` |
+| `vile-iso7b-boot-35.png` | `acba8fb8…0b9f` |
+| `vile-iso7b-boot-36.png` | `311fd6bb…0040` |
+| `vile-iso7b-boot-37.png` | `3ae3e460…d748` |
+| `vile-iso7b-boot-38.png` | `662198a2…936a` |
+| `vile-iso7b-boot-39.png` | `86e6fea2…8926` |
+| `vile-iso7b-boot-40.png` | `1feadc0b…3fac` |
+| `vile-iso7b-boot-41.png` | `c6558be2…f49c` |
+| `vile-lock-01.png` | `84985c85…dd7f` |
+| `vile-lock-02.png` | `aca5a7d7…5e83` |
+| `vile-lock-03.png` | `97cc6595…d7ee` |
+| `vile-lock-10.png` | `1af4dfbe…3a93` |
+| `vile-lock-11.png` | `9afa92e7…4a75` |
+| `vile-lock-12.png` | `76cf8d2e…b9f0` |
+| `vile-lock-13.png` | `b205de44…b07d` |
+| `vile-logo-01-bare.png` | `2bc29bce…ccf0` |
+| `vile-logo-02-other.png` | `5f96ea37…71aa` |
+| `vile-logo-03-window-over.png` | `d809476e…b0ec` |
+| `vile-look-01-1280x800.png` | `71b5fdf4…3633` |
+| `vile-look-01.png` | `207ae9d6…5bde` |
+| `vile-look-02.png` | `18eefcb6…b976` |
+| `vile-look-03.png` | `6fa82dfc…a24f` |
+| `vile-look-menu-final.png` | `299703c9…4ecc` |
+| `vile-look-menu.png` | `4b84fc93…9797` |
+| `vile-look-settings-alone.png` | `4750f4bf…0e70` |
+| `vile-look-settings.png` | `872fc3dd…f7ab` |
+| `vile-screen-01.png` | `e585a996…5e5a` |
+| `vile-screen-02.png` | `09e3225d…a25b` |
+| `vile-screenfit-01.png` | `e439b83e…2e16` |
+| `vile-screenfit-02.png` | `e3c3cc31…3322` |
+| `vile-settings-01.png` | `6e4944af…364b` |
+| `vile-settings-02.png` | `f2b1b408…00ec` |
+| `vile-settings-03-unlocked.png` | `0590b79f…1485` |
+| `vile-settings-03.png` | `9f4e3cf3…d1cd` |
+| `vile-settings-04.png` | `0bc6a638…e2ed` |
+| `vile-settings-picker-open.png` | `3ed298d6…e8bc` |
+| `vile-settings-picker.png` | `2e52b3a5…e43b` |
+| `vile-settings-remove-probe.png` | `1a203d6b…7f88` |
+| `vile-settings-run-setup-01.png` | `8f8effc1…ef93` |
+| `vile-settings-run-setup-02.png` | `bcd8d814…fc6c` |
+| `vile-settings-run-setup-03.png` | `99f178da…f84a` |
+| `vile-setup-01-welcome.png` | `3f901955…a74f` |
+| `vile-setup-02-name.png` | `e91417ef…7a08` |
+| `vile-setup-03-picker-open.png` | `b9b2d956…2641` |
+| `vile-setup-04-name-picture.png` | `283a17bb…9b41` |
+| `vile-setup-05-wallpaper.png` | `e2be7582…1624` |
+| `vile-setup-06-wallpaper-nebula.png` | `2175fdbd…3188` |
+| `vile-setup-06b-theme.png` | `25d5ee18…0332` |
+| `vile-setup-06c-theme-light.png` | `7e7e8cd5…53de` |
+| `vile-setup-07-apps.png` | `33acf46f…8e1a` |
+| `vile-setup-08-timezone.png` | `3b28321b…0b9f` |
+| `vile-setup-09-done.png` | `ae02b4ee…2dbd` |
+| `vile-setup-10-installing.png` | `37754f0e…af08` |
+| `vile-setup-11-installing-done.png` | `1f8c78de…40ac` |
+| `vile-setup-12-desktop.png` | `6ab39a30…e50d` |
+| `vile-setup-13-lock.png` | `eb6894ae…31fd` |
+| `vile-setup-14-unlocked.png` | `6ab39a30…e50d` |
+| `vile-setup-15-second-boot.png` | `6ab39a30…e50d` |
+| `vile-system-00-top.png` | `bf7f30ce…76bb` |
+| `vile-system-01-gauges.png` | `9cd49545…6305` |
+| `vile-system-01-layout.png` | `f0958b72…2de4` |
+| `vile-system-02-cpu.png` | `b2b1bea4…c885` |
+| `vile-system-02-hardware.png` | `0aef7886…6903` |
+| `vile-system-03-load.png` | `a43fd806…c411` |
+| `vile-system-03-net-a.png` | `b917259d…0f80` |
+| `vile-system-03-net-b.png` | `e8d0203b…fa3c` |
+| `vile-system-04-idle-again.png` | `c735c21f…ba03` |
+| `vile-system-04-load.png` | `34c704a8…695c` |
+| `vile-system-05-idle-again.png` | `22285f94…3b37` |
+| `vile-theme-01-dark.png` | `6ddee24e…e249` |
+| `vile-theme-02-light.png` | `ad962ee6…925b` |
+| `vile-theme-02b-live-dark.png` | `6ddee24e…e249` |
+| `vile-theme-02c-live-light.png` | `ad962ee6…925b` |
+| `vile-theme-02d-light-foot.png` | `a947a11b…81dc` |
+| `vile-theme-03-light-menu.png` | `542e1296…01be` |
+| `vile-theme-04-light-lock.png` | `219bf5c0…1e36` |
+| `vile-theme-05-light-unlocked.png` | `9362d03d…c624` |
+| `vile-theme-06-settings-dark.png` | `1e3ef3e8…13f1` |
+| `vile-theme-07-settings-light.png` | `7b29c0d0…50a6` |
+| `vile-theme-08-light-1280x800.png` | `402d7636…a8c7` |
+| `vile-tiling-01.png` | `2bf16799…8263` |
+| `vile-tiling-02.png` | `68bb1ca2…5250` |
+| `vile-tiling-03.png` | `801e842a…16fa` |
+| `vile-tiling-fullscreen.png` | `d86bd350…2bbf` |
+| `vile-tiling-restored.png` | `801e842a…16fa` |
+| `vile-tiling-retile.png` | `988643db…97a0` |
+| `vile-tiling-wallpaper-nebula.png` | `477cb5f2…8507` |
+| `vile-wallpaper-01.png` | `56ec8d91…5c67` |
+| `vile-wallpaper-02.png` | `56ec8d91…5c67` |
+| `vile-wallpaper-03.png` | `c70bbb7e…0ee9` |
+
+_344 files. This table is the single source of truth for
+screenshot shas — older per-section values in this log are
+history and may not match disk._
+
+================================================================
+## ISO 0.5.5 — dock-click fix + frosted dock + wizard Enter fix (Nov 10-11, 2026)
+================================================================
+
+### The 0.5.4 dock-click regression — ROOT CAUSE (proven, not a guess)
+Symptom (QEMU iso7b session 2): on-target dock clicks did nothing —
+V icon (576,717) + 70s = nothing; Files icon (709,709) + 70s = nothing.
+Bar pill clicks, menu Settings row, Windows+Enter all worked; 0.5.3
+dock clicks worked. Prime suspect (layer-shell input region) was WRONG:
+the dock is NOT a layer-shell surface (grep -c "layer" main.c = 0) — it
+is a wlr_scene_buffer in the compositor's own scene tree; clicks are
+hit-tested in vile_cursor_button -> vile_shell_click -> vile_dock_slot_at.
+Real root cause: the 400ms HOLD TIMER (0.5.4 hold-drag reorder).
+vile_shell_click on press arms dock_press_slot + dock_hold_timer at
+400ms; vile_dock_hold_timer_cb (main.c:6055) sets dock_reorder = true
+for any press held >=400ms without moving; vile_dock_release
+(main.c:6076) then treats it as a reorder drop — in-place drops log
+"dropped in place" and return WITHOUT activating. So ANY press held
+>=400ms and released without moving silently does nothing. QEMU's HMP
+click holds the button ~1s (qglide2.py: mouse_button 1, sleep 0.3,
+mouse_button 0, plus 0.3s connect + 0.4s post-send per mon() call), so
+every QEMU dock click was eaten. Headless vptr_test click is press ->
+release in ~ms, so the 14/14 harness passed. 0.5.3 had no hold timer
+(hold-drag reorder came in the 0.5.4 queue work) — that is why 0.5.3
+worked in QEMU. REAL bug, not a test artifact: any user press held
+>=400ms (hesitation, slow click, sticky button) is also eaten on real
+hardware.
+Secondary (test-aiming) finding: the QEMU clicks used STALE 5-icon
+dock centres. Session 2 had 4 icons (Setup gear gone after the wizard
+completed). At 1280x800: 4-icon centres are foot (532,708), settings/V
+(604,708), screenfit (676,708), files (748,708). The Files click at
+(709,709) landed in the inter-icon gap (704-720) — correctly consumed
+with no action. The V click at (576,717) was the left edge of the V
+rect (576-632). The compositor logs current centres on every order
+change — QEMU re-tests must parse the CURRENT line, not reuse old
+centres.
+Reproduction (before any main.c change): holdclick mode added to
+compositor/tests/vptr_test.c (move, press, hold N ms default 600,
+release without moving) + VPTR_W/VPTR_H extent env vars (default
+1920x1080) so absolute motion is correct at 1280x800; new harness
+compositor/tests/run-dock-hold-test.sh [OUT_W OUT_H] (B/C: hold-click
+Files/Settings, A/D: quick-click controls, E: hold-drag reorder
+guard). PRE-FIX: B/C FAIL at both 1920x1080 and 1280x800 (log shows
+reorder drag 'files' (slot 3) -> reorder 'files' dropped in place
+(slot 3), no "open Files"), A/D/E PASS. Bug reproduced headless at
+both resolutions — a geometry bug was ruled out; it is the hold timer.
+Fix (main.c): in vile_dock_release, a reorder that drops in place AND
+never moved (!dock_press_moved, >12px threshold) now pops + activates
+(vile_anim_dock_pop + vile_shell_dock_activate_app). A real drag-away
+(moved >12px, returned to the same slot) still does nothing, per the
+existing rule. Comment updated with the rule and the 0.5.4 regression.
+Second bug in the same path: vile_shell_find_app used case-sensitive
+strncmp(title, prefix) — dock ids are lowercase ("settings") but window
+titles are capitalised ("Settings"), so a second dock click on an open
+Settings spawned a DUPLICATE Settings window instead of focusing.
+Fixed with strncasecmp + #include <strings.h> (same fix covers
+ScreenFit). Phase D of the hold harness tightened to require focus
+with no second spawn.
+main.c sha: edd4c7dc... (0.5.4) -> 4b3c75ad... (hold fix) ->
+7c7450a8... (hold fix + strncasecmp) -> 4a8bc90f... (current: + frost
++ wallpaper-watcher dock re-render, see below).
+Post-fix: dock-hold test ALL 6 PASS at 1920x1080 and ALL 6 PASS at
+1280x800; dock harness ALL 14 PASS (re-run on the frosted binary).
+
+### Dock design v3 — FROSTED glass, macOS-style (Adnan, Nov 10 ~19:52)
+0.5.3 dark solid pill -> 0.5.4 bare/transparent -> 0.5.5 FROSTED.
+His words: "clean not transparent, but like a little... transparent
+like I see it but not too much like too black I can see the
+background." Reference: macOS dock photo (user/files/DD52BC12-...jpg).
+Implementation (main.c): vile_shell_build_dock_frost(server, x, y, w,
+h) — separate function modelled line-for-line on the bar frost builder
+(vile_shell_build_bar_frost, main.c:4535): crop the wallpaper strip
+behind the dock rect (cover-fit math, same as vile_fit_wallpaper),
+swizzle RGBA->ARGB32, blur via downscale-to-tiny then upscale
+bilinear. The bar builder was NOT touched. vile_shell_render_dock
+paints the pill first: frost clipped to the rounded rect (px=40,
+py=20, dock_w x VILE_DOCK_H 80, radius 18) -> translucent tint (same
+clip) -> hairline edge (P->edge, 0.15) -> existing icons/dots/
+insertion-indicator on top. Tint (tuned by eye): dark theme a
+translucent dark grey rgb (0.16,0.15,0.20) alpha 0.38 ("not
+near-black"); light theme panel_rgb (0.988,0.980,1.0) alpha 0.55.
+Frost cached in new server fields (shell_dock_frost,
+shell_dock_frost_path/mtime/x/y/w/h) next to shell_bar_frost, keyed by
+wallpaper path+mtime + dock rect + output size — the dock re-renders
+on hover changes, so a full wallpaper decode per frame is too
+expensive. Everything else unchanged: centered, grows from the
+middle, hover grow, click pop, hold-drag reorder, right-click Unpin,
+Setup icon lifecycle, running dots. Input untouched by the frost:
+hit-test rect shell_dock_rect is exactly the pill rect.
+Bug found while proving the frost: the wallpaper watcher re-rendered
+the BAR on wallpaper change but NOT the dock, so the dock frost kept
+the OLD wallpaper's blur until the next dock event (pill-gap pixel
+identical across wallpapers). Fixed with one line in the watcher:
+vile_shell_render_dock(server) after vile_shell_render_bar(server).
+Harness trap found in the same work: VILE_WALLPAPER env WINS over the
+~/.config/vile/wallpaper hook file (vile_wallpaper_path priority 1),
+so any harness that exports it can never switch wallpapers live — the
+dock harness phase 5 "nebula" shot was actually purple Arch (its
+sha is byte-identical to the earlier shots), and the first frost
+harness run had the same flaw. The frost harness (run-dock-frost-
+test.sh) writes the hook file instead and starts with a BARE desktop
+(no -s foot — a tiled foot window covers the wallpaper the dock is
+supposed to show through).
+Proof (new harness compositor/tests/run-dock-frost-test.sh, ALL 6
+PASS): grim shots read by eye — nebula dark: the purple nebula
+swirls ARE faintly visible through the pill, icons crisp, not black
+(pill-gap mean RGB (30,25,51) vs wallpaper-above (42,33,81)); purple
+Arch dark: clean slightly-lighter grey pill (42,42,55) vs wallpaper
+(43,45,58), single Arch logo, no overlay; nebula light: light
+lavender-white frost (150,145,163), icons crisp; Arch light
+(158,157,166). Quick click on the frosted pill opens Files (5a PASS).
+Shots: vile-dock-frost-01-arch-dark.png 4e4e2bb9..., vile-dock-frost-
+02-nebula-dark.png 7c25c408..., vile-dock-frost-02-nebula-dark-zoom.png
+87ef8e29..., vile-dock-frost-03-nebula-light.png 0cca9731...,
+vile-dock-frost-04-arch-light.png 9ac393ee....
+
+### Wizard Enter race — ROOT CAUSE (proven headless, NOT a QEMU artifact)
+QEMU sightings (twice): one Enter on the Welcome step completed the
+whole 7-step setup. Headless probe (new harness
+compositor/tests/run-wizard-enter-test.sh): one vkey_test Return (one
+press + one release) also completed the setup — setup-done existed,
+wizard gone. NOT keyboard repeat (compositor repeat is 25/s after
+600ms; vkey holds ~50ms) and NOT 9x on_continue: a TEMP debug print
+in on_continue printed ZERO times. The files written were setup-done
++ timezone only (wallpaper hook was the compositor's random default)
+— the signature of on_skip, not on_continue. Second debug print
+(main(), after show_all): "WIZARD-DEBUG initial focus: 'Skip setup'".
+Root cause: GTK gives the window's initial focus to the first
+SENSITIVE focusable widget — at step 0 Back is insensitive, so focus
+landed on "Skip setup", and in GTK3 Return activates the FOCUSED
+button. One Enter fired on_skip -> setup-done + destroy. Fix
+(setup/vile-setup.py, main()): win.continue_btn.grab_focus() after
+grab_default(), so Enter hits Continue (one step). Proof: probe
+ALL 4 PASS — after one Enter the wizard is on the Name step
+("What should Vile call you?", 2 dots, shot 116c541f...), after two
+Enters it is on the Wallpaper step (3 dots, shot 7f8fe3b8...).
+--step 3 dots/content mismatch (test-path only): REPRODUCED headless
+(4 dots filled, Welcome content, shot b9c36fab...). Cause: the
+pre-show_all set_visible_child_name does not stick — the stack shows
+its first child. Disabling the slide transition for the initial call
+did NOT fix it (tried, reverted). Fix: re-assert the step AFTER
+show_all in main() (win.show_step(...) when args.step is set) — once
+realized, the same call works. Proof: --step 3 now shows "Dark or
+light?" with 4 dots filled (shot 7424fa1e...). Shots:
+vile-wizard-enter-01-welcome.png f0954527....
+
+### Full regression on the 0.5.5 binary (main.c 4a8bc90f...)
+Batch 1 (pre-frost binary, for the record): drag ALL PASS, look /
+look-1280x800 / input / tiling / anim all exit 0 (0 FAIL lines).
+Batch A (frosted binary): files, files-11, files-11-test2, files-12
+(ALL v1.2 GUI CHECKS PASSED), files-13 (ALL 4 PASS), theme, dock-
+files, wallpaper, lock, lock-redesign, lock-settings, screenfit,
+banner — all exit 0. settings, settings-picker, setup first failed
+only because the /tmp/vile-test-avatar.jpg fixture was wiped by a VM
+reset — regenerated (512x512 purple #6D4AFF, white bold "AD") and all
+three then exit 0. system first failed because run-system-test.sh
+sets HOME to a scratch dir, so pip's meson module (in the real
+~/.local) was invisible (ModuleNotFoundError); fixed in the harness
+with PYTHONUSERBASE="$REAL_HOME/.local" on the meson setup line —
+then exit 0. Batch B (frosted binary): drag, dock (ALL 14 PASS),
+look, look-1280x800, input, tiling, anim exit 0; dock-hold ALL 6
+PASS at 1920x1080 and ALL 6 PASS at 1280x800; wizard-enter ALL 4
+PASS (above); setup harness re-run after the wizard fixes: exit 0.
+
+### Version bump 0.5.5
+compositor/meson.build 0.5.4 -> 0.5.5; compositor/vile-foot.sh banner
+v0.5.4 -> v0.5.5; settings/vile-settings.py About "Compositor
+v0.5.4" -> v0.5.5; setup/vile-setup.py VERSION 0.5.4 -> 0.5.5 and
+the setup-done marker content "vile-setup 0.5.4" -> 0.5.5;
+archiso/profiledef.sh iso_version 0.5.4 -> 0.5.5. Historical
+"0.5.4" comments (post-theme fixes etc.) intentionally kept.
+### Current screenshot shas — 2026-11-11 01:46 UTC
+
+Produced by: 0.5.5 proof: dock-hold (both res), dock-frost, wizard-enter, full regression batches A/B, setup re-run — Nov 11 2026 ~01:45 EST
+
+| File | sha256 (first 8 … last 4) |
+|---|---|
+| `vile-anim-close-after.png` | `ff467e45…4914` |
+| `vile-anim-close-mid.png` | `81900b61…a0cf` |
+| `vile-anim-dock-hover.png` | `a087616f…e80d` |
+| `vile-anim-lock-mid.png` | `39905151…b3ff` |
+| `vile-anim-menu-after.png` | `183015ba…6269` |
+| `vile-anim-menu-mid.png` | `3011c5b4…1723` |
+| `vile-anim-startup-mid.png` | `6d8d93f8…731e` |
+| `vile-anim-unlock-after.png` | `ff467e45…4914` |
+| `vile-anim-unlock-mid.png` | `2787c997…d673` |
+| `vile-anim-window-after.png` | `a087616f…e80d` |
+| `vile-anim-window-mid.png` | `a087616f…e80d` |
+| `vile-banner-01.png` | `dc07d3cb…e8a4` |
+| `vile-banner-02.png` | `8d19dd35…2acd` |
+| `vile-bar-01-bare.png` | `e0ca4797…740c` |
+| `vile-bar-logo-zoom.png` | `870c30f5…57e0` |
+| `vile-bar-nebula.png` | `57d7dfa8…e0fc` |
+| `vile-bar-zoom.png` | `527f81d6…c220` |
+| `vile-dock-01-bare.png` | `b393d65c…a5ec` |
+| `vile-dock-02-reorder.png` | `74aaa4ae…5d77` |
+| `vile-dock-03-unpin.png` | `32306dec…b8c8` |
+| `vile-dock-04-unpinned.png` | `99c64338…4ce8` |
+| `vile-dock-05-setupgone.png` | `3acbbce1…d8c9` |
+| `vile-dock-06-bar.png` | `3acbbce1…d8c9` |
+| `vile-dock-07-menu.png` | `1518ccc6…8738` |
+| `vile-dock-08-nebula.png` | `3acbbce1…d8c9` |
+| `vile-dock-files-01.png` | `e333649a…1d87` |
+| `vile-dock-files-02.png` | `52b97cbb…8ba6` |
+| `vile-dock-files-03-hover.png` | `7405aac7…8dca` |
+| `vile-dock-files-03-ungrown.png` | `06e7281d…5fe4` |
+| `vile-dock-frost-01-arch-dark.png` | `4e4e2bb9…e694` |
+| `vile-dock-frost-02-nebula-dark-zoom.png` | `87ef8e29…1e10` |
+| `vile-dock-frost-02-nebula-dark.png` | `7c25c408…c734` |
+| `vile-dock-frost-03-nebula-light.png` | `0cca9731…a069` |
+| `vile-dock-frost-04-arch-light.png` | `9ac393ee…3ab0` |
+| `vile-dock-hold-00-bare.png` | `3be6f4fb…16ed` |
+| `vile-dock-hold-01-files.png` | `f8e41aa1…fb18` |
+| `vile-dock-hold-02-settings.png` | `3a66cc87…7ab2` |
+| `vile-dock-hold-03-files-quick.png` | `1254bb21…e3c1` |
+| `vile-dock-hold-04-settings-quick.png` | `79174269…b8cf` |
+| `vile-dock-hold-05-reorder.png` | `dba7ab00…fc76` |
+| `vile-drag-00-bare.png` | `d6ee9d0e…0d83` |
+| `vile-drag-00-dock.png` | `65a02f1d…8ecd` |
+| `vile-drag-01-fullscreen.png` | `05e45763…2913` |
+| `vile-drag-02-mid.png` | `bafc792b…1784` |
+| `vile-drag-03-dropped.png` | `bafc792b…1784` |
+| `vile-drag-04-superdrag.png` | `d1408248…4cd2` |
+| `vile-drag-04b-superrdrag.png` | `912da46e…52ad` |
+| `vile-drag-05-resized.png` | `a3a21cb9…aa96` |
+| `vile-drag-06-maximized.png` | `7ec74255…e555` |
+| `vile-drag-07-minimized.png` | `f9e6437e…e311` |
+| `vile-drag-08-restored.png` | `f106fa9e…3343` |
+| `vile-drag-09-menu.png` | `ef588125…c9bb` |
+| `vile-drag-10-blur.png` | `5360313c…7546` |
+| `vile-drag-11-nebula.png` | `b39c8f0a…2fd3` |
+| `vile-explore-foot.png` | `81641c79…c493` |
+| `vile-files-01.png` | `11bf9495…4744` |
+| `vile-files-02.png` | `d2bb641d…5159` |
+| `vile-files-03.png` | `42bbae36…0f12` |
+| `vile-files-04-dialog.png` | `b69aab41…3df1` |
+| `vile-files-04.png` | `8f77eb9e…85df` |
+| `vile-files-05.png` | `6719f20d…b41c` |
+| `vile-files-11-devices.png` | `34919dd9…1d2c` |
+| `vile-files-11-drive-added.png` | `079a5e20…dfa2` |
+| `vile-files-11-drive-open.png` | `f3ce53e7…5e30` |
+| `vile-files-11-drive-removed.png` | `34919dd9…1d2c` |
+| `vile-files-11-probe.png` | `9b652eda…e39e` |
+| `vile-files-11-sidebar.png` | `b96cc2f4…b8ef` |
+| `vile-files-12-bundle-zip.png` | `4806085c…84d6` |
+| `vile-files-12-error-corrupt.png` | `5bf4a32c…430e` |
+| `vile-files-12-error-locked.png` | `b0060638…9f55` |
+| `vile-files-12-extract-to-done.png` | `9827bf9e…2764` |
+| `vile-files-12-extract-to.png` | `792907a8…da88` |
+| `vile-files-12-extracted.png` | `71a99be5…8ee1` |
+| `vile-files-12-menu-folder.png` | `e36c8f72…2f77` |
+| `vile-files-12-menu-multi.png` | `a53e3491…4a76` |
+| `vile-files-12-menu-zip.png` | `1bfc71fc…95fb` |
+| `vile-files-12-name-dialog.png` | `f7bfed80…ab66` |
+| `vile-files-12-pack-zip.png` | `181b7832…a3dc` |
+| `vile-files-12-progress.png` | `06506347…b694` |
+| `vile-files-13-probe.png` | `8774424a…8fc3` |
+| `vile-files-13-rename.png` | `58386642…062c` |
+| `vile-files-13-renamed.png` | `5526e643…2965` |
+| `vile-files-13-trash.png` | `e6416427…f500` |
+| `vile-files-13-trashed.png` | `e9bb0bb3…066b` |
+| `vile-input-01.png` | `02e6bb1c…ff76` |
+| `vile-input-02-closed.png` | `02e6bb1c…ff76` |
+| `vile-input-02-escaped.png` | `3b0fba04…c243` |
+| `vile-input-02-nofocus.png` | `9e3026d6…16ba` |
+| `vile-input-02-open.png` | `e825a0bc…baca` |
+| `vile-input-02-refocus.png` | `88c00dab…9dfa` |
+| `vile-input-02.png` | `411a2883…6693` |
+| `vile-input-03-unlocked.png` | `1d6d19ad…41a4` |
+| `vile-input-03.png` | `43b87384…1850` |
+| `vile-iso-boot-01.png` | `8110e773…e454` |
+| `vile-iso-boot-02.png` | `1e817616…776b` |
+| `vile-iso-boot-03.png` | `58983643…f69b` |
+| `vile-iso-boot-04.png` | `21a85a30…8593` |
+| `vile-iso-boot-05.png` | `6fe9677a…4010` |
+| `vile-iso-boot-06.png` | `c40bc7b2…3038` |
+| `vile-iso-boot-07.png` | `2736153b…07d9` |
+| `vile-iso-boot-08.png` | `f353949f…438c` |
+| `vile-iso-boot-09.png` | `71818b78…2ef1` |
+| `vile-iso-boot-10.png` | `7e06ac12…2755` |
+| `vile-iso2-boot-01.png` | `4ad1b1a1…a1fd` |
+| `vile-iso2-boot-02.png` | `07948414…f079` |
+| `vile-iso2-boot-03.png` | `8327432c…f32c` |
+| `vile-iso2-boot-04.png` | `22ea52db…ea25` |
+| `vile-iso2-boot-05.png` | `40db1b9b…b6e1` |
+| `vile-iso3-boot-01.png` | `44b6ba0e…df01` |
+| `vile-iso3-boot-02.png` | `07948414…f079` |
+| `vile-iso3-boot-03.png` | `6fe9677a…4010` |
+| `vile-iso3-boot-04.png` | `84483650…0870` |
+| `vile-iso3-boot-05.png` | `68c50222…fac2` |
+| `vile-iso3-boot-06.png` | `899a33a2…4385` |
+| `vile-iso3-boot-07.png` | `11f79308…dec6` |
+| `vile-iso3-boot-08.png` | `dd34912c…b34c` |
+| `vile-iso3-boot-09.png` | `4c2d06ef…559a` |
+| `vile-iso3-boot-10.png` | `07948414…f079` |
+| `vile-iso3-boot-10b.png` | `6fe9677a…4010` |
+| `vile-iso3-boot-11.png` | `be91db44…edd4` |
+| `vile-iso3-boot-12.png` | `540ce71b…3bf4` |
+| `vile-iso3-boot-13.png` | `8e43d1a4…1dee` |
+| `vile-iso3-boot-14.png` | `0eef67d8…bf09` |
+| `vile-iso4-boot-01.png` | `c7c8e84a…4a9f` |
+| `vile-iso4-boot-02.png` | `a4b739fd…0ad1` |
+| `vile-iso4-boot-03.png` | `58983643…f69b` |
+| `vile-iso4-boot-04.png` | `21a85a30…8593` |
+| `vile-iso4-boot-05.png` | `5ec54a69…0ec3` |
+| `vile-iso5-arrow35-zoom.png` | `2d9d5df3…f075` |
+| `vile-iso5-boot-01.png` | `7f897e03…dbd1` |
+| `vile-iso5-boot-02.png` | `07948414…f079` |
+| `vile-iso5-boot-03.png` | `47d63618…9801` |
+| `vile-iso5-boot-04.png` | `01732892…75ee` |
+| `vile-iso5-boot-05.png` | `063370cd…17a7` |
+| `vile-iso5-boot-06.png` | `850bf0b7…c143` |
+| `vile-iso5-boot-07.png` | `26ff3867…07be` |
+| `vile-iso5-boot-08.png` | `994802ce…5a1a` |
+| `vile-iso5-boot-09.png` | `1b06a0b9…37c7` |
+| `vile-iso5-boot-10.png` | `a7d21623…1638` |
+| `vile-iso5-boot-11.png` | `4ed5e290…7897` |
+| `vile-iso5-boot-12.png` | `630f58bb…08ef` |
+| `vile-iso5-boot-13.png` | `630f58bb…08ef` |
+| `vile-iso5-boot-14.png` | `3a701804…25b4` |
+| `vile-iso5-boot-15.png` | `1561cc67…dbfa` |
+| `vile-iso5-boot-16.png` | `93ae09da…a028` |
+| `vile-iso5-boot-17.png` | `bde8e33c…992e` |
+| `vile-iso5-boot-18.png` | `4c86d4e3…ff21` |
+| `vile-iso5-boot-19.png` | `102ed567…3b0e` |
+| `vile-iso5-boot-20.png` | `ec21562e…43bd` |
+| `vile-iso5-boot-21.png` | `6cebb668…95dd` |
+| `vile-iso5-boot-22.png` | `e60b18ca…3937` |
+| `vile-iso5-boot-23.png` | `450db866…1963` |
+| `vile-iso5-boot-24.png` | `172ac880…8a01` |
+| `vile-iso5-boot-25.png` | `9caedc0e…c764` |
+| `vile-iso5-boot-26.png` | `d4449af2…c869` |
+| `vile-iso5-boot-27.png` | `828b2332…3d28` |
+| `vile-iso5-boot-28.png` | `b693e066…000d` |
+| `vile-iso5-boot-29.png` | `88f24abf…80eb` |
+| `vile-iso5-boot-30.png` | `88f24abf…80eb` |
+| `vile-iso5-boot-31.png` | `fc6c0f9b…a92b` |
+| `vile-iso5-boot-32.png` | `3a4342d9…9d29` |
+| `vile-iso5-boot-33.png` | `3e445ff3…168d` |
+| `vile-iso5-boot-34.png` | `3fc809fe…878b` |
+| `vile-iso5-boot-35.png` | `7e172f1c…8373` |
+| `vile-iso5-boot-36.png` | `b50c94e7…1be8` |
+| `vile-iso5-boot-37.png` | `d021570b…6940` |
+| `vile-iso5-boot-38.png` | `47e0e38b…02a7` |
+| `vile-iso5-boot-39.png` | `8ffe311f…cdfd` |
+| `vile-iso5-boot-40.png` | `0979fa7d…83f7` |
+| `vile-iso5-boot-41.png` | `0f150522…e739` |
+| `vile-iso5-boot-42.png` | `5cd25624…9964` |
+| `vile-iso5-boot-43.png` | `407e8cb6…5860` |
+| `vile-iso5-boot-44.png` | `fa369114…eeef` |
+| `vile-iso5-boot-45.png` | `34afdf7a…c7d5` |
+| `vile-iso5-dock-zoom.png` | `9c87efe8…babb` |
+| `vile-iso5-dock32-zoom.png` | `ff70ff13…c8cb` |
+| `vile-iso5-dock33-zoom.png` | `ff70ff13…c8cb` |
+| `vile-iso5-dock34-zoom.png` | `91997dbd…83f6` |
+| `vile-iso6-boot-01.png` | `4e43bebc…f27e` |
+| `vile-iso6-boot-02.png` | `d0a4d0b8…795c` |
+| `vile-iso6-boot-03.png` | `58983643…f69b` |
+| `vile-iso6-boot-04.png` | `dd7867d3…9ef6` |
+| `vile-iso6-boot-05.png` | `05713dba…bd53` |
+| `vile-iso6-boot-06.png` | `f7efb5e2…c90b` |
+| `vile-iso6-boot-07.png` | `7814599d…2a4b` |
+| `vile-iso6-boot-08.png` | `b62234bb…bca8` |
+| `vile-iso6-boot-09.png` | `278216fb…6f54` |
+| `vile-iso6-boot-10.png` | `81be8330…6533` |
+| `vile-iso6-boot-11.png` | `e921d323…e9ea` |
+| `vile-iso6-boot-12.png` | `ed38fde7…ecb8` |
+| `vile-iso6-boot-13.png` | `de920377…2b90` |
+| `vile-iso6-boot-14.png` | `de920377…2b90` |
+| `vile-iso6-boot-15.png` | `9f78c816…dfa7` |
+| `vile-iso6-boot-16.png` | `9f78c816…dfa7` |
+| `vile-iso6-boot-17.png` | `e7769d62…c1f7` |
+| `vile-iso6-boot-18.png` | `574fa5f1…3abd` |
+| `vile-iso6-boot-19.png` | `7f837958…74e4` |
+| `vile-iso6-boot-20.png` | `7f837958…74e4` |
+| `vile-iso6-boot-21.png` | `0ed17d31…825d` |
+| `vile-iso6-boot-22.png` | `0ed17d31…825d` |
+| `vile-iso6-boot-23.png` | `beecbc07…732a` |
+| `vile-iso6-boot-24.png` | `c5a1c43b…996e` |
+| `vile-iso6-boot-25.png` | `cb13dee9…6bc9` |
+| `vile-iso6-boot-26.png` | `c5b08965…b83a` |
+| `vile-iso6-boot-27.png` | `05d90491…2fff` |
+| `vile-iso6-boot-28.png` | `4960e730…581f` |
+| `vile-iso6-boot-29.png` | `3825b365…3178` |
+| `vile-iso6-boot-30.png` | `f257b73f…41ee` |
+| `vile-iso6-boot-31.png` | `d84ebc6b…9394` |
+| `vile-iso6-boot-32.png` | `2ee5e7d4…52a8` |
+| `vile-iso6-boot-33.png` | `53c8d4ad…37ea` |
+| `vile-iso6-boot-34.png` | `ffbf7cd3…7336` |
+| `vile-iso6-boot-35.png` | `98b94f6e…f77f` |
+| `vile-iso6-boot-36.png` | `e66b03fd…5bc3` |
+| `vile-iso6-boot-37.png` | `11f3c2ad…61c6` |
+| `vile-iso6-boot-38.png` | `42ad74ce…7dae` |
+| `vile-iso6-boot-39.png` | `0f9c36f1…010d` |
+| `vile-iso6-boot-40.png` | `f79cc98d…6d3e` |
+| `vile-iso7-boot-01.png` | `f9274a43…5d27` |
+| `vile-iso7-boot-02.png` | `346e8b34…2fa5` |
+| `vile-iso7-boot-03.png` | `dd7867d3…9ef6` |
+| `vile-iso7-boot-04.png` | `083e338f…4446` |
+| `vile-iso7-boot-05.png` | `9ce42d56…61c7` |
+| `vile-iso7-boot-06.png` | `195f4036…3269` |
+| `vile-iso7-boot-07.png` | `be5e9e29…7952` |
+| `vile-iso7-boot-08.png` | `be5e9e29…7952` |
+| `vile-iso7-boot-09.png` | `0d1836a4…9db2` |
+| `vile-iso7-boot-10.png` | `5acbd66b…8780` |
+| `vile-iso7-boot-11.png` | `bc54279f…c79c` |
+| `vile-iso7-boot-12.png` | `dbbe65c2…d47c` |
+| `vile-iso7-boot-13.png` | `277ac00b…6e53` |
+| `vile-iso7-boot-14.png` | `52e9816a…e57f` |
+| `vile-iso7b-boot-01.png` | `3ce89207…7496` |
+| `vile-iso7b-boot-02.png` | `07948414…f079` |
+| `vile-iso7b-boot-03.png` | `dd7867d3…9ef6` |
+| `vile-iso7b-boot-04.png` | `759e2de3…1e03` |
+| `vile-iso7b-boot-05.png` | `bb28acad…267e` |
+| `vile-iso7b-boot-06.png` | `1087dbe5…0c24` |
+| `vile-iso7b-boot-07.png` | `210976c6…0ad9` |
+| `vile-iso7b-boot-08.png` | `628010da…096b` |
+| `vile-iso7b-boot-09.png` | `a557157b…cdef` |
+| `vile-iso7b-boot-10.png` | `c33985aa…eba6` |
+| `vile-iso7b-boot-11.png` | `0e6eabb8…2eb6` |
+| `vile-iso7b-boot-12.png` | `32d570ec…a9ad` |
+| `vile-iso7b-boot-13.png` | `698719bf…609a` |
+| `vile-iso7b-boot-14.png` | `64a82e53…889a` |
+| `vile-iso7b-boot-15.png` | `750b313a…0446` |
+| `vile-iso7b-boot-16.png` | `750b313a…0446` |
+| `vile-iso7b-boot-17.png` | `6ba7cd14…f478` |
+| `vile-iso7b-boot-18.png` | `ea36fb0f…48a6` |
+| `vile-iso7b-boot-19.png` | `d1231a03…0e5f` |
+| `vile-iso7b-boot-20.png` | `3abd0a71…ff96` |
+| `vile-iso7b-boot-21.png` | `b2e2beb8…7675` |
+| `vile-iso7b-boot-22.png` | `22f98658…f786` |
+| `vile-iso7b-boot-23.png` | `b13557f4…e7cf` |
+| `vile-iso7b-boot-24.png` | `864cee9b…0e98` |
+| `vile-iso7b-boot-25.png` | `859025e7…df36` |
+| `vile-iso7b-boot-26.png` | `75707ff2…4197` |
+| `vile-iso7b-boot-27.png` | `d9f5bdb0…7b91` |
+| `vile-iso7b-boot-28.png` | `7c31f6fe…b9ee` |
+| `vile-iso7b-boot-29.png` | `7c31f6fe…b9ee` |
+| `vile-iso7b-boot-30.png` | `f0ca9e44…d8d0` |
+| `vile-iso7b-boot-31.png` | `883a4253…2a05` |
+| `vile-iso7b-boot-32.png` | `bbf844b8…20d2` |
+| `vile-iso7b-boot-33.png` | `4a4dae47…d9a3` |
+| `vile-iso7b-boot-34.png` | `3cad325e…bfb0` |
+| `vile-iso7b-boot-35.png` | `acba8fb8…0b9f` |
+| `vile-iso7b-boot-36.png` | `311fd6bb…0040` |
+| `vile-iso7b-boot-37.png` | `3ae3e460…d748` |
+| `vile-iso7b-boot-38.png` | `662198a2…936a` |
+| `vile-iso7b-boot-39.png` | `86e6fea2…8926` |
+| `vile-iso7b-boot-40.png` | `1feadc0b…3fac` |
+| `vile-iso7b-boot-41.png` | `c6558be2…f49c` |
+| `vile-lock-01.png` | `80494bce…e744` |
+| `vile-lock-02.png` | `591bdd30…f0cc` |
+| `vile-lock-03.png` | `97cc6595…d7ee` |
+| `vile-lock-10.png` | `80494bce…e744` |
+| `vile-lock-11.png` | `591bdd30…f0cc` |
+| `vile-lock-12.png` | `76cf8d2e…b9f0` |
+| `vile-lock-13.png` | `9f80b4b3…9311` |
+| `vile-logo-01-bare.png` | `2bc29bce…ccf0` |
+| `vile-logo-02-other.png` | `5f96ea37…71aa` |
+| `vile-logo-03-window-over.png` | `d809476e…b0ec` |
+| `vile-look-01-1280x800.png` | `4069d37d…6b36` |
+| `vile-look-01.png` | `f2e6662f…9de1` |
+| `vile-look-02.png` | `55d12095…83fe` |
+| `vile-look-03.png` | `6428502b…fe4e` |
+| `vile-look-menu-final.png` | `299703c9…4ecc` |
+| `vile-look-menu.png` | `4fcce45d…47ad` |
+| `vile-look-settings-alone.png` | `bdb8ec52…3ba1` |
+| `vile-look-settings.png` | `a504bdd8…f877` |
+| `vile-screen-01.png` | `e585a996…5e5a` |
+| `vile-screen-02.png` | `09e3225d…a25b` |
+| `vile-screenfit-01.png` | `bf19713c…89b0` |
+| `vile-screenfit-02.png` | `39cc1c43…3ff6` |
+| `vile-settings-01.png` | `e927b2ec…ac59` |
+| `vile-settings-02.png` | `4fdb2089…ba22` |
+| `vile-settings-03-unlocked.png` | `daa1bdea…7332` |
+| `vile-settings-03.png` | `d7182a6b…f8bb` |
+| `vile-settings-04.png` | `0bc6a638…e2ed` |
+| `vile-settings-picker-open.png` | `dee80b6c…fc37` |
+| `vile-settings-picker.png` | `89f9e02a…d824` |
+| `vile-settings-remove-probe.png` | `1a203d6b…7f88` |
+| `vile-settings-run-setup-01.png` | `8f8effc1…ef93` |
+| `vile-settings-run-setup-02.png` | `bcd8d814…fc6c` |
+| `vile-settings-run-setup-03.png` | `99f178da…f84a` |
+| `vile-setup-01-welcome.png` | `3b745834…9982` |
+| `vile-setup-02-name.png` | `313076dd…c0da` |
+| `vile-setup-03-picker-open.png` | `fb96c396…5174` |
+| `vile-setup-04-name-picture.png` | `29248f39…dfe8` |
+| `vile-setup-05-wallpaper.png` | `219b9246…1a8b` |
+| `vile-setup-06-wallpaper-nebula.png` | `10ad3602…9eda` |
+| `vile-setup-06b-theme.png` | `ae2c1690…a325` |
+| `vile-setup-06c-theme-light.png` | `4a032643…fc2b` |
+| `vile-setup-07-apps.png` | `9832e912…e80e` |
+| `vile-setup-08-timezone.png` | `99e60226…27ff` |
+| `vile-setup-09-done.png` | `462e0e18…857a` |
+| `vile-setup-10-installing.png` | `65cf6978…e3b9` |
+| `vile-setup-11-installing-done.png` | `2f486745…bff7` |
+| `vile-setup-12-desktop.png` | `7096aef0…e351` |
+| `vile-setup-13-lock.png` | `de95b736…b80c` |
+| `vile-setup-14-unlocked.png` | `9bca05e6…910a` |
+| `vile-setup-15-second-boot.png` | `9bca05e6…910a` |
+| `vile-system-00-top.png` | `2075c7c4…3733` |
+| `vile-system-01-gauges.png` | `9cd49545…6305` |
+| `vile-system-01-layout.png` | `3c13e407…d469` |
+| `vile-system-02-cpu.png` | `1c23349b…4e8f` |
+| `vile-system-02-hardware.png` | `0aef7886…6903` |
+| `vile-system-03-load.png` | `a43fd806…c411` |
+| `vile-system-03-net-a.png` | `47239297…50f0` |
+| `vile-system-03-net-b.png` | `f8c41573…12c1` |
+| `vile-system-04-idle-again.png` | `c735c21f…ba03` |
+| `vile-system-04-load.png` | `87097ee2…67e3` |
+| `vile-system-05-idle-again.png` | `8699bd1f…66ba` |
+| `vile-theme-01-dark.png` | `4b6da9ee…0955` |
+| `vile-theme-02-light.png` | `53596d13…9f06` |
+| `vile-theme-02b-live-dark.png` | `4b6da9ee…0955` |
+| `vile-theme-02c-live-light.png` | `53596d13…9f06` |
+| `vile-theme-02d-light-foot.png` | `7e1f8a98…c391` |
+| `vile-theme-03-light-menu.png` | `df53a8ce…c49f` |
+| `vile-theme-04-light-lock.png` | `33551b49…ecaa` |
+| `vile-theme-05-light-unlocked.png` | `d07ddd95…54a8` |
+| `vile-theme-06-settings-dark.png` | `ab84c110…851c` |
+| `vile-theme-07-settings-light.png` | `80b7dfef…7c76` |
+| `vile-theme-08-light-1280x800.png` | `debf9d61…3083` |
+| `vile-tiling-01.png` | `4c838af3…be2c` |
+| `vile-tiling-02.png` | `55c403b0…3926` |
+| `vile-tiling-03.png` | `3b8507c2…0fe8` |
+| `vile-tiling-fullscreen.png` | `d86bd350…2bbf` |
+| `vile-tiling-restored.png` | `3b8507c2…0fe8` |
+| `vile-tiling-retile.png` | `a44e8daf…d2dc` |
+| `vile-tiling-wallpaper-nebula.png` | `369f0d74…c037` |
+| `vile-wallpaper-01.png` | `3c98ff9c…2fee` |
+| `vile-wallpaper-02.png` | `3c98ff9c…2fee` |
+| `vile-wallpaper-03.png` | `a623c918…660d` |
+| `vile-wizard-enter-01-welcome.png` | `f0954527…6c79` |
+| `vile-wizard-enter-02-after-one-enter.png` | `116c541f…52e6` |
+| `vile-wizard-enter-03-after-two-enters.png` | `7f8fe3b8…d563` |
+| `vile-wizard-step3-01.png` | `7424fa1e…a8b6` |
+
+_359 files. This table is the single source of truth for
+screenshot shas — older per-section values in this log are
+history and may not match disk._
+
+### Step 2 — ISO 0.5.5 build (build20 series, Nov 11, 2026)
+Staging (0.5.4 recipe): live tree rsync'd into
+archiso/airootfs/root/vile-os/ (compositor, settings, filemanager,
+setup, assets, wallpapers, foot.ini, README.md, docs/BUILD_LOG.md;
+excluded compositor/build/ and __pycache__); ScreenFit synced from
+~/workspace/intel-display-center/src/; VILE-README.txt rewritten for
+0.5.5 (frosted dock). Verified staged tree: main.c sha 4a8bc90f...,
+banner/meson/Settings/setup all 0.5.5. Chroot profile synced:
+rsync -a --delete archiso/ build-env/root.x86_64/root/vile-iso/,
+diff -r clean.
+Disk quota (recurring): the home fs has a USER quota — df shows 49G
+free but writes fail with "Disk quota exceeded" once headroom is
+gone. Probe (urandom, home fs — never /dev/zero; /tmp is a 512M
+tmpfs and dies at 456MB, which is a different limit): 3000MB OK
+only after freeing 4.2G — deleted the chroot-out DUPLICATE ISOs
+(build-env/root.x86_64/root/vile-iso-out/vile-os-0.5.{3,4}-x86_64.iso,
+byte-identical to iso/ via sha256, 2.8G) + the stale work dir (1.4G).
+Headroom was ~530MB at the worst point; the HF cache (4.7G: AVES
+datasets + faster-whisper models) was NOT touched — it is Adnan's ML
+work, not build scratch.
+- build20 (foreground exec, SIGTERM'd at ~408s by the runtime —
+  foreground execs do not survive; use nohup from now on): pacstrap
+  reached hooks 21/27; geo.mirror.pkgbuild.com 404'd core.db/extra.db
+  and several package files (linux, gcc, firmware) mid-run.
+- build20b (nohup): exit 1 fast — stale pacman db.lck from the
+  killed run. Removed the lock.
+- build20c (nohup): exit 1 — SSL error 19 on ALL mirrors. The
+  sandbox egress CA ROTATED again (live "Hatch Sandbox Egress CA"
+  fingerprint now 37:BD:8F:38:..., chroot store had the old
+  7E:DA:E1:49:...). Canonical fix (0.5.4 playbook): extracted the
+  current CA cert from /run/hatch/egress-tls/ca-bundle.pem (cert-121),
+  replaced $R/usr/local/share/ca-certificates/hatch-egress-ca.crt,
+  `chroot $R trust anchor --store ...` + `trust extract-compat`.
+  Verified: chroot curl with the SYSTEM bundle (SSL_CERT_FILE unset)
+  to geo.mirror.pkgbuild.com returns HTTP 200.
+- build20d (nohup): pacstrap SUCCEEDED ("Done! Packages installed
+  successfully"), version/boot/syslinux/grub done, then mksquashfs
+  died at 0% — quota headroom was ~530MB vs a 1.35G .sfs. Recovery:
+  cleared the chroot pacman cache ($R/var/cache/pacman/pkg, 1.1G —
+  safe, _make_packages marker already existed) -> headroom 1400MB.
+- build20e (nohup): mksquashfs SUCCEEDED (.sfs 1,350,651,904 bytes),
+  then xorriso died at 19.05% (ISO 298MB) — quota again (the .sfs
+  had eaten the headroom). Recovery per the build18 playbook:
+  deleted the truncated ISO + the unpacked work airootfs (3.0G, no
+  longer needed — the .sfs is built and /boot is copied out) ->
+  headroom ~1.9G.
+- build20f (nohup): MKARCHISO EXIT: 0. ISO built.
+
+### Step 2 verification — ISO 0.5.5 PROVEN at file level
+- ISO: ~/workspace/vile-os/iso/vile-os-0.5.5-x86_64.iso —
+  1,494,777,856 bytes, sha256
+  b559a9f115103111d8bc544d04dd227e8cd73c126d54d8819a4ff43891408472,
+  Volume ID VILE_OS (LABEL VILE_OS, UUID 2026-11-11-01-49-23-00),
+  /arch/version = 0.5.5, MKARCHISO EXIT: 0.
+- Hash chain (full 128-char comparison): ISO .sfs extent (LBA 49858,
+  1,350,651,904 bytes) sha512 = recorded airootfs.sha512 = work-dir
+  .sfs sha512sum =
+  6bc91b61205b0e9cab2cf9f0979f908d796dd21bc28c577f1dd9bb4e46b31d92
+  6f249a202ca3851dd67698ef1404bcc72c4752e1429f3251fb35533eb848bf2a.
+  Verified with iso/sfs-check/verify11.py (adapted from verify10.py).
+- .sfs contents (build-env/verify-sfs11.sh, all PASS): md5s of main.c,
+  vile-files.py, vile-setup.py, vile-settings.py, screenfit.py identical
+  to workspace sources; foot logos purple (b0a9a3ec... / e5a2f29d...);
+  banner v0.5.5, meson 0.5.5, Settings "Compositor v0.5.5" + VERSION
+  0.3.0; VILE-README.txt "Vile OS 0.5.5 — live ISO"; vile logos
+  95c3211d... / 4f3be1cc...; bare icon f30b26d1..., blur-light
+  63b41b88...; overlay deleted (vile_load_logo/vile_fit_logo count 0);
+  "Log Out" 4; frost builder (vile_shell_build_dock_frost) 2, "Frosted
+  dock" 4; wizard grab_focus 1, --step re-assert 1, setup VERSION
+  0.5.5; ScreenFit CSS_DARK 3; foot.ini [colors-dark] x3; pam.d/vile
+  present; launchers 755; Files 1.2.0; vile-install.sh contains
+  wayland-sessions/vile.desktop; README.md + docs/BUILD_LOG.md present;
+  Hatch certs in ISO trust store: 0. (Note: grep -c "dropped in
+  place" is 0 in the .sfs main.c only because the log string is split
+  across two source lines — md5 identity with the live 4a8bc90f...
+  main.c proves the hold fix is in the ISO.)
+
+### Step 3 — QEMU boot test "iso8" (0.5.5 ISO, fresh boot, Nov 11 ~02:2x EST)
+QEMU 8.2.2 was MISSING from this VM (reset wiped it) — reinstalled
+via apt (qemu-system-x86, 13min apt update through the slow proxy,
+then install). Same flags as iso7/iso7b: -m 1024 -smp 2 -vga std
+-display none -monitor unix:build-env/qemu-monitor,server,nowait
+-cdrom iso/vile-os-0.5.5-x86_64.iso -boot d. Screenshot naming:
+vile-iso8-boot-NN.png. QEMU PID 17130.
+- 01 1079405a958eed23 (720x400): systemd booting ([ OK ] lines).
+- 02 220a052323638162 (1280x800): "Initial Setup" timezone prompt.
+  Enter to skip.
+- 03 4636bd00783c5137 (1280x800): root autologin, Arch Linux
+  7.2.15-arch1-1 (tty1), [root@archlinux ~]#.
+- 04 8069fc2872769e75 (1280x800): COMPOSITOR UP — nebula wallpaper,
+  CLEAN, NO Arch logo overlay; FROSTED dock (pill visible, nebula
+  faintly showing through, 5 icons: foot, V, ScreenFit, Files,
+  Setup gear); bar: NO V tile, centered bold clock "02:32 Wed 11
+  Nov", status pill right; mouse arrow top-left.
+- 05 67f9be23eb592896 (1280x800): SETUP WIZARD on first boot —
+  "Welcome to Vile", ribbon V hero, 7 dots, 1 filled. Frosted dock
+  below. (Wizard bottom buttons partially hidden behind dock/bar
+  at 1280x800 — known, Dell is 1920x1080.)
+- 06 afa1ae3d1d248251 (1280x800): WIZARD ENTER RACE — FIXED IN THE
+  BOOTED ISO. One Enter (sendkey ret 50) on Welcome advanced
+  EXACTLY ONE step: wizard now on the Name step ("What should
+  Vile call you?", 2 dots, entry prefilled "root"). In iso7/iso7b
+  the same Enter completed the entire setup. The grab_focus fix
+  works on real hardware-path input, not just headless. Dock
+  still 5 icons (Setup gear present — setup NOT complete).
+- 07 c1d8491bc5eb98f3 (1280x800): wizard closed via Super+Q —
+  bare desktop, nebula, FROSTED dock 5 icons, bar clean, clock
+  "02:35 Wed 11 Nov". Dock icon centres measured by pixel
+  clustering on this shot: foot ~507, V ~567, ScreenFit ~640,
+  Files ~711, Setup ~782, y-centre ~708 — matches the 0.5.4
+  numbers (496/568/640/712/784), so the frost kept the same
+  geometry.
+- 08 38f96709327bddd4 (1280x800): FIRST-SESSION DOCK CLICK #1 —
+  GATE PASSED. qglide2 click on the V icon (567,708), on-target,
+  +45s wait: SETTINGS OPENED (Profile Picture root, Theme Dark
+  Current / Light). Running dot under V. (This is the exact
+  click that did NOTHING in 0.5.4 iso7b.)
+- 09 b799479a16da3bf1 (1280x800): FIRST-SESSION DOCK CLICK #2 —
+  GATE PASSED. qglide2 click on the Files icon (711,708),
+  on-target (701,708), +45s: VILE FILES OPENED, tiled beside
+  Settings (Home sidebar, Desktop/Documents/Downloads/Music/
+  Pictures/Videos/vile-os/VILE-README.txt 2.7 KB, "8 items •
+  248.7 MB free of 256.0 MB on /"). Running dots under V + Files.
+- 10 916ee5cc43e8c2f7 (1280x800): FIRST-SESSION DOCK CLICK #3 —
+  foot dock icon (507,708). qglide2 reported "lost cursor" but
+  the click still landed: FOOT OPENED, tiled, banner "VILE OS ·
+  v0.5.5" + keybind help, prompt [root@archlinux compositor]#.
+  Running dots under foot + V + Files. (The "lost cursor" was a
+  qglide2 tracking miss, not a missed click — the cursor was
+  visible on the foot icon in the shot.)
+- 11 955cd7d059c101ad (1280x800): THEME SWITCH LIVE — clicked
+  "Light" in Settings: the whole desktop went light (Settings
+  lavender-white, Light "✓ Current", bar light grey with dark
+  clock, dock light frosted lavender-white, icons crisp). The
+  light-theme frosted dock in the booted ISO matches the
+  headless frost shots.
+- 12 ada3d68046831e3a (1280x800): status-pill click attempt #1
+  (light theme) — qglide2 lost the cursor over the light bar,
+  click landed on the clock (~735,775), no menu. Test-aiming
+  failure, not a compositor result.
+- 13 34a34a56696bcf3f (1280x800): raw move (-400,-100) from
+  (735,775) landed the cursor at the left edge (~0,615)
+  (factor ~1.8x).
+- 14 85dfa41ce17405f (1280x800): Super+Q closed Settings — Files
+  (left, LIGHT) + foot (right, dark) tiled; dock light frosted
+  with dots under foot/V/Files. (Files followed the light theme
+  live; foot stays dark by design — foot.ini colours.)
+- 15 362b46eddb83103f (1280x800): raw move (400,0) put the
+  cursor in foot as an I-beam (~755,615). I-beam shape defeats
+  qglide2's arrow-shaped bright-cluster filter (too thin).
+- 16 3fd9c32cbc594a96 (1280x800): qglide2 "cannot locate cursor"
+  (I-beam) — click fired at the same spot, no menu.
+- 17 6d5ae993447ffbac (1280x800): two (100,0) raw moves walked
+  the I-beam to ~(975,615) (factor ~1.1x).
+- 18 f17160e7d4cba8fe (1280x800): two more (100,0) + (0,80):
+  cursor now an ARROW at ~(1195,700) over dark wallpaper,
+  right of the dock.
+- 19 ddceabd70f604224 (1280x800): (0,70) move: arrow at
+  ~(1195,770) — ON the status pill (Wi-Fi icon area), light
+  theme. Verified by eye.
+- 20 622552d40cccf639 (1280x800): status-pill click attempt #2
+  (light theme, slow mon() hold, cursor on pill) — NO MENU.
+- 21 0d354b0a51316cfd (1280x800): attempt #3 (moved +30px,
+  slow hold, cursor ~(1225,770) on pill) — NO MENU.
+- 22 b469264138431086 (1280x800): attempt #4 (quick 50ms
+  single-connection click, cursor (1225,768)) — NO MENU.
+- 23 4e8a9625ba794ab3 (1280x800): dock V click re-test —
+  on-target (561,707): did NOT spawn a duplicate Settings
+  (strncasecmp fix works in the booted ISO) — it FOCUSED the
+  existing Settings window (raised, bottom-right). No second
+  Settings window exists.
+- 24 dae49e47fea16a67 (1280x800): drag attempt on Settings
+  title bar failed (glide lost cursor on the light dock);
+  window unmoved.
+- 25 75deccbea559a457 (1280x800): PageDown scrolled Settings —
+  Theme section visible, Dark row at ~(850,640).
+- 26 942c5b6a029750f0 (1280x800): raw move (0,400) — cursor
+  not visible in the shot (I-beam over dark foot, too thin
+  to spot at this scale).
+- 27 9bf335da30370374 (1280x800): qglide2 "cannot locate
+  cursor" (I-beam) — click fired blind; cursor ended at the
+  bottom edge (~790,795); theme still light.
+- 28 050b8b3867f358ee (1280x800): Windows+J focused foot
+  (purple border). Typed a sed command but it went to the
+  wrong window (focus had been cleared by the wallpaper
+  click) — no effect.
+- 29 c5535d1bfa5bce29 (1280x800): THEME FILE WATCHER LIVE —
+  `sed -i s/light/dark/ /root/.config/vile/theme` in foot:
+  Files + Settings + bar + dock all went DARK live (no
+  restart). Compositor watches ~/.config/vile/theme mtime.
+- 30 c5535d1bfa5bce29 (byte-identical to 29): qglide2 "cannot
+  locate cursor" — the cursor was parked at the bottom edge
+  (790,795), clipped so small that the bright-cluster filter
+  (<15px / <10px tall) could not see it; the probes moved
+  nothing. (Zoomed crop /tmp/iso8-cursor-zoom.png proves the
+  arrow tip is there, cut off by the edge.) Mouse was NOT
+  dead — the cursor was just unfindable at the edge.
+- 31 38d20b0cc205c8e3 (1280x800): SYSTEM MENU OPEN — DARK
+  THEME. After a raw (0,-100) move off the edge, qglide2
+  located the cursor (970,744), lost it on the next step,
+  but the click still landed on the pill: menu open with
+  SYSTEM / Wi-Fi Unavailable / Volume slider / Battery No
+  battery / Lock / Settings / **Log Out** / Power Off. The
+  pill works in 0.5.5 dark theme; Log Out row proven in the
+  booted 0.5.5 ISO.
+- 32 ac631952ebb662d6 (1280x800): click on the wallpaper
+  (891,698) closed the menu (click-outside-closes works).
+- 33 b17e26e3ac5045ee (1280x800): Windows+J + typed
+  `sed -i s/dark/light/ ...` — went to the wrong window
+  again (foot not focused); no effect.
+- 34 47b0a2fc938075e9 (1280x800): clicked foot's title bar
+  to focus it, then `sed -i s/dark/light/
+  /root/.config/vile/theme` ran. Bar + dock went LIGHT
+  live (compositor), but the GTK apps (Settings body,
+  Files) stayed DARK — they do not re-read the theme file
+  live; they only follow a switch made inside Settings
+  itself (shot 11/14). Not a blocker: the Settings-click
+  path (the real user path) switches everything.
+- 35 0776de0cc3861ad3 (1280x800): `cat
+  /root/.config/vile/theme` = "light" — file is light,
+  compositor surfaces are light, GTK apps still dark
+  (same mixed-state note as shot 34).
+- 36 436706c006efd7f1 (1280x800): light-theme pill re-test
+  attempt #1 — raw (0,450) overshot to the bottom edge
+  (~1010,795), glide could not locate the cursor, click
+  landed on empty bar (x 1010, left of the pill) — no
+  menu. INCONCLUSIVE (missed the pill).
+- 37 afc528ad025dd9f (1280x800): raw (150,0) move: cursor
+  VERIFIED on the pill (Wi-Fi icon, ~(1195,770)), light
+  theme.
+- 38 96bc7e8e551e449c (1280x800): SYSTEM MENU OPEN — LIGHT
+  THEME. Quick 50ms click with the cursor verified on the
+  pill: light panel, SYSTEM / Wi-Fi Unavailable / Volume /
+  Battery No battery / Lock / Settings / **Log Out** /
+  Power Off. The pill works in light theme too.
+  VERDICT on attempts #2-4 (shots 20-22): those three
+  light-theme pill clicks failed with the cursor ESTIMATED
+  (not verified) on the pill; the 4th, with the cursor
+  verified on the pill, opened the menu. The likely cause
+  is aiming error (arrow tip vs. body, ~10px, hard to judge
+  on the light bar), NOT a theme bug — the pill rect is
+  theme-independent (main.c:5159: x=1138, y=760, 128x40,
+  no-battery) and the same code path opened the menu in
+  dark (shot 31) and light (shot 38). Do NOT treat shots
+  20-22 as a compositor regression.
+  QEMU MOUSE LESSONS (add to the iso7 notes): the white
+  arrow is invisible to qglide2 over near-white surfaces
+  (light Settings window, light bar) because the bright
+  set becomes the whole window; the I-beam over foot text
+  is too thin for the 8-30px cluster filter; a cursor
+  parked at the screen edge is clipped too small to find.
+  Stage the cursor on DARK wallpaper first, then glide;
+  verify the arrow is ON the target by eye before clicking.
+
+### Step 3 (cont.) — QEMU boot test "iso8b" (0.5.5 ISO, SECOND fresh boot, Nov 11 ~02:5x EST)
+QEMU PID 20272. Screenshot naming: vile-iso8b-boot-NN.png.
+- 01 d2741e8dac0a5dd1 (720x400): systemd booting.
+- 02 589836437f740721 (1280x800): "Initial Setup" timezone prompt.
+  Enter to skip.
+- 03 6750af0a0007c59f (1280x800): COMPOSITOR UP — nebula
+  wallpaper, frosted dock 5 icons, bar clean, clock "02:59 Wed
+  11 Nov". (Autologin + `vile` typed between shots 02/03.)
+- 04 2feb55ab554f7bce (1280x800): SETUP WIZARD on first boot —
+  "Welcome to Vile", 7 dots, 1 filled, frosted dock below.
+- 05 b290352c045a64eb (1280x800): SECOND-SESSION DOCK CLICK #1 —
+  GATE PASSED AGAIN. Wizard closed via Super+Q, qglide2 click
+  on the V icon (567,708), on-target (567,716), +45s: SETTINGS
+  OPENED (Profile Picture root, Theme Dark Current / Light).
+  Running dot under V.
+- 06 3cfcf07b0657baf0 (1280x800): SECOND-SESSION DOCK CLICK #2 —
+  GATE PASSED AGAIN. qglide2 click on the Files icon (711,708),
+  on-target (701,708), +45s: VILE FILES OPENED, tiled beside
+  Settings ("8 items • 248.7 MB free of 256.0 MB on /").
+  Running dots under V + Files.
+  0.5.5 dock clicks confirmed in TWO independent fresh boots.
+  QEMU killed (PID 20272).
+
+### Step 3 (done) — buggy 0.5.4 ISO deleted
+0.5.5 proven in QEMU in two sessions, so the buggy 0.5.4 ISO was
+deleted (sha 7be25352… verified before `rm`). Remaining ISOs:
+vile-os-0.5.3-x86_64.iso (1,493,336,064 bytes, sha a8c7d253…,
+KEPT until the parent says otherwise) and
+vile-os-0.5.5-x86_64.iso (1,494,777,856 bytes, sha b559a9f1…,
+the proven build). 0.5.5 is the current good build.
+### Current screenshot shas — 2026-11-11 03:03 UTC
+
+| File | sha256 (first 8 … last 4) |
+|---|---|
+| `vile-anim-close-after.png` | `ff467e45…4914` |
+| `vile-anim-close-mid.png` | `81900b61…a0cf` |
+| `vile-anim-dock-hover.png` | `a087616f…e80d` |
+| `vile-anim-lock-mid.png` | `39905151…b3ff` |
+| `vile-anim-menu-after.png` | `183015ba…6269` |
+| `vile-anim-menu-mid.png` | `3011c5b4…1723` |
+| `vile-anim-startup-mid.png` | `6d8d93f8…731e` |
+| `vile-anim-unlock-after.png` | `ff467e45…4914` |
+| `vile-anim-unlock-mid.png` | `2787c997…d673` |
+| `vile-anim-window-after.png` | `a087616f…e80d` |
+| `vile-anim-window-mid.png` | `a087616f…e80d` |
+| `vile-banner-01.png` | `dc07d3cb…e8a4` |
+| `vile-banner-02.png` | `8d19dd35…2acd` |
+| `vile-bar-01-bare.png` | `e0ca4797…740c` |
+| `vile-bar-logo-zoom.png` | `870c30f5…57e0` |
+| `vile-bar-nebula.png` | `57d7dfa8…e0fc` |
+| `vile-bar-zoom.png` | `527f81d6…c220` |
+| `vile-dock-01-bare.png` | `b393d65c…a5ec` |
+| `vile-dock-02-reorder.png` | `74aaa4ae…5d77` |
+| `vile-dock-03-unpin.png` | `32306dec…b8c8` |
+| `vile-dock-04-unpinned.png` | `99c64338…4ce8` |
+| `vile-dock-05-setupgone.png` | `3acbbce1…d8c9` |
+| `vile-dock-06-bar.png` | `3acbbce1…d8c9` |
+| `vile-dock-07-menu.png` | `1518ccc6…8738` |
+| `vile-dock-08-nebula.png` | `3acbbce1…d8c9` |
+| `vile-dock-files-01.png` | `e333649a…1d87` |
+| `vile-dock-files-02.png` | `52b97cbb…8ba6` |
+| `vile-dock-files-03-hover.png` | `7405aac7…8dca` |
+| `vile-dock-files-03-ungrown.png` | `06e7281d…5fe4` |
+| `vile-dock-frost-01-arch-dark.png` | `4e4e2bb9…e694` |
+| `vile-dock-frost-02-nebula-dark-zoom.png` | `87ef8e29…1e10` |
+| `vile-dock-frost-02-nebula-dark.png` | `7c25c408…c734` |
+| `vile-dock-frost-03-nebula-light.png` | `0cca9731…a069` |
+| `vile-dock-frost-04-arch-light.png` | `9ac393ee…3ab0` |
+| `vile-dock-hold-00-bare.png` | `3be6f4fb…16ed` |
+| `vile-dock-hold-01-files.png` | `f8e41aa1…fb18` |
+| `vile-dock-hold-02-settings.png` | `3a66cc87…7ab2` |
+| `vile-dock-hold-03-files-quick.png` | `1254bb21…e3c1` |
+| `vile-dock-hold-04-settings-quick.png` | `79174269…b8cf` |
+| `vile-dock-hold-05-reorder.png` | `dba7ab00…fc76` |
+| `vile-drag-00-bare.png` | `d6ee9d0e…0d83` |
+| `vile-drag-00-dock.png` | `65a02f1d…8ecd` |
+| `vile-drag-01-fullscreen.png` | `05e45763…2913` |
+| `vile-drag-02-mid.png` | `bafc792b…1784` |
+| `vile-drag-03-dropped.png` | `bafc792b…1784` |
+| `vile-drag-04-superdrag.png` | `d1408248…4cd2` |
+| `vile-drag-04b-superrdrag.png` | `912da46e…52ad` |
+| `vile-drag-05-resized.png` | `a3a21cb9…aa96` |
+| `vile-drag-06-maximized.png` | `7ec74255…e555` |
+| `vile-drag-07-minimized.png` | `f9e6437e…e311` |
+| `vile-drag-08-restored.png` | `f106fa9e…3343` |
+| `vile-drag-09-menu.png` | `ef588125…c9bb` |
+| `vile-drag-10-blur.png` | `5360313c…7546` |
+| `vile-drag-11-nebula.png` | `b39c8f0a…2fd3` |
+| `vile-explore-foot.png` | `81641c79…c493` |
+| `vile-files-01.png` | `11bf9495…4744` |
+| `vile-files-02.png` | `d2bb641d…5159` |
+| `vile-files-03.png` | `42bbae36…0f12` |
+| `vile-files-04-dialog.png` | `b69aab41…3df1` |
+| `vile-files-04.png` | `8f77eb9e…85df` |
+| `vile-files-05.png` | `6719f20d…b41c` |
+| `vile-files-11-devices.png` | `34919dd9…1d2c` |
+| `vile-files-11-drive-added.png` | `079a5e20…dfa2` |
+| `vile-files-11-drive-open.png` | `f3ce53e7…5e30` |
+| `vile-files-11-drive-removed.png` | `34919dd9…1d2c` |
+| `vile-files-11-probe.png` | `9b652eda…e39e` |
+| `vile-files-11-sidebar.png` | `b96cc2f4…b8ef` |
+| `vile-files-12-bundle-zip.png` | `4806085c…84d6` |
+| `vile-files-12-error-corrupt.png` | `5bf4a32c…430e` |
+| `vile-files-12-error-locked.png` | `b0060638…9f55` |
+| `vile-files-12-extract-to-done.png` | `9827bf9e…2764` |
+| `vile-files-12-extract-to.png` | `792907a8…da88` |
+| `vile-files-12-extracted.png` | `71a99be5…8ee1` |
+| `vile-files-12-menu-folder.png` | `e36c8f72…2f77` |
+| `vile-files-12-menu-multi.png` | `a53e3491…4a76` |
+| `vile-files-12-menu-zip.png` | `1bfc71fc…95fb` |
+| `vile-files-12-name-dialog.png` | `f7bfed80…ab66` |
+| `vile-files-12-pack-zip.png` | `181b7832…a3dc` |
+| `vile-files-12-progress.png` | `06506347…b694` |
+| `vile-files-13-probe.png` | `8774424a…8fc3` |
+| `vile-files-13-rename.png` | `58386642…062c` |
+| `vile-files-13-renamed.png` | `5526e643…2965` |
+| `vile-files-13-trash.png` | `e6416427…f500` |
+| `vile-files-13-trashed.png` | `e9bb0bb3…066b` |
+| `vile-input-01.png` | `02e6bb1c…ff76` |
+| `vile-input-02-closed.png` | `02e6bb1c…ff76` |
+| `vile-input-02-escaped.png` | `3b0fba04…c243` |
+| `vile-input-02-nofocus.png` | `9e3026d6…16ba` |
+| `vile-input-02-open.png` | `e825a0bc…baca` |
+| `vile-input-02-refocus.png` | `88c00dab…9dfa` |
+| `vile-input-02.png` | `411a2883…6693` |
+| `vile-input-03-unlocked.png` | `1d6d19ad…41a4` |
+| `vile-input-03.png` | `43b87384…1850` |
+| `vile-iso-boot-01.png` | `8110e773…e454` |
+| `vile-iso-boot-02.png` | `1e817616…776b` |
+| `vile-iso-boot-03.png` | `58983643…f69b` |
+| `vile-iso-boot-04.png` | `21a85a30…8593` |
+| `vile-iso-boot-05.png` | `6fe9677a…4010` |
+| `vile-iso-boot-06.png` | `c40bc7b2…3038` |
+| `vile-iso-boot-07.png` | `2736153b…07d9` |
+| `vile-iso-boot-08.png` | `f353949f…438c` |
+| `vile-iso-boot-09.png` | `71818b78…2ef1` |
+| `vile-iso-boot-10.png` | `7e06ac12…2755` |
+| `vile-iso2-boot-01.png` | `4ad1b1a1…a1fd` |
+| `vile-iso2-boot-02.png` | `07948414…f079` |
+| `vile-iso2-boot-03.png` | `8327432c…f32c` |
+| `vile-iso2-boot-04.png` | `22ea52db…ea25` |
+| `vile-iso2-boot-05.png` | `40db1b9b…b6e1` |
+| `vile-iso3-boot-01.png` | `44b6ba0e…df01` |
+| `vile-iso3-boot-02.png` | `07948414…f079` |
+| `vile-iso3-boot-03.png` | `6fe9677a…4010` |
+| `vile-iso3-boot-04.png` | `84483650…0870` |
+| `vile-iso3-boot-05.png` | `68c50222…fac2` |
+| `vile-iso3-boot-06.png` | `899a33a2…4385` |
+| `vile-iso3-boot-07.png` | `11f79308…dec6` |
+| `vile-iso3-boot-08.png` | `dd34912c…b34c` |
+| `vile-iso3-boot-09.png` | `4c2d06ef…559a` |
+| `vile-iso3-boot-10.png` | `07948414…f079` |
+| `vile-iso3-boot-10b.png` | `6fe9677a…4010` |
+| `vile-iso3-boot-11.png` | `be91db44…edd4` |
+| `vile-iso3-boot-12.png` | `540ce71b…3bf4` |
+| `vile-iso3-boot-13.png` | `8e43d1a4…1dee` |
+| `vile-iso3-boot-14.png` | `0eef67d8…bf09` |
+| `vile-iso4-boot-01.png` | `c7c8e84a…4a9f` |
+| `vile-iso4-boot-02.png` | `a4b739fd…0ad1` |
+| `vile-iso4-boot-03.png` | `58983643…f69b` |
+| `vile-iso4-boot-04.png` | `21a85a30…8593` |
+| `vile-iso4-boot-05.png` | `5ec54a69…0ec3` |
+| `vile-iso5-arrow35-zoom.png` | `2d9d5df3…f075` |
+| `vile-iso5-boot-01.png` | `7f897e03…dbd1` |
+| `vile-iso5-boot-02.png` | `07948414…f079` |
+| `vile-iso5-boot-03.png` | `47d63618…9801` |
+| `vile-iso5-boot-04.png` | `01732892…75ee` |
+| `vile-iso5-boot-05.png` | `063370cd…17a7` |
+| `vile-iso5-boot-06.png` | `850bf0b7…c143` |
+| `vile-iso5-boot-07.png` | `26ff3867…07be` |
+| `vile-iso5-boot-08.png` | `994802ce…5a1a` |
+| `vile-iso5-boot-09.png` | `1b06a0b9…37c7` |
+| `vile-iso5-boot-10.png` | `a7d21623…1638` |
+| `vile-iso5-boot-11.png` | `4ed5e290…7897` |
+| `vile-iso5-boot-12.png` | `630f58bb…08ef` |
+| `vile-iso5-boot-13.png` | `630f58bb…08ef` |
+| `vile-iso5-boot-14.png` | `3a701804…25b4` |
+| `vile-iso5-boot-15.png` | `1561cc67…dbfa` |
+| `vile-iso5-boot-16.png` | `93ae09da…a028` |
+| `vile-iso5-boot-17.png` | `bde8e33c…992e` |
+| `vile-iso5-boot-18.png` | `4c86d4e3…ff21` |
+| `vile-iso5-boot-19.png` | `102ed567…3b0e` |
+| `vile-iso5-boot-20.png` | `ec21562e…43bd` |
+| `vile-iso5-boot-21.png` | `6cebb668…95dd` |
+| `vile-iso5-boot-22.png` | `e60b18ca…3937` |
+| `vile-iso5-boot-23.png` | `450db866…1963` |
+| `vile-iso5-boot-24.png` | `172ac880…8a01` |
+| `vile-iso5-boot-25.png` | `9caedc0e…c764` |
+| `vile-iso5-boot-26.png` | `d4449af2…c869` |
+| `vile-iso5-boot-27.png` | `828b2332…3d28` |
+| `vile-iso5-boot-28.png` | `b693e066…000d` |
+| `vile-iso5-boot-29.png` | `88f24abf…80eb` |
+| `vile-iso5-boot-30.png` | `88f24abf…80eb` |
+| `vile-iso5-boot-31.png` | `fc6c0f9b…a92b` |
+| `vile-iso5-boot-32.png` | `3a4342d9…9d29` |
+| `vile-iso5-boot-33.png` | `3e445ff3…168d` |
+| `vile-iso5-boot-34.png` | `3fc809fe…878b` |
+| `vile-iso5-boot-35.png` | `7e172f1c…8373` |
+| `vile-iso5-boot-36.png` | `b50c94e7…1be8` |
+| `vile-iso5-boot-37.png` | `d021570b…6940` |
+| `vile-iso5-boot-38.png` | `47e0e38b…02a7` |
+| `vile-iso5-boot-39.png` | `8ffe311f…cdfd` |
+| `vile-iso5-boot-40.png` | `0979fa7d…83f7` |
+| `vile-iso5-boot-41.png` | `0f150522…e739` |
+| `vile-iso5-boot-42.png` | `5cd25624…9964` |
+| `vile-iso5-boot-43.png` | `407e8cb6…5860` |
+| `vile-iso5-boot-44.png` | `fa369114…eeef` |
+| `vile-iso5-boot-45.png` | `34afdf7a…c7d5` |
+| `vile-iso5-dock-zoom.png` | `9c87efe8…babb` |
+| `vile-iso5-dock32-zoom.png` | `ff70ff13…c8cb` |
+| `vile-iso5-dock33-zoom.png` | `ff70ff13…c8cb` |
+| `vile-iso5-dock34-zoom.png` | `91997dbd…83f6` |
+| `vile-iso6-boot-01.png` | `4e43bebc…f27e` |
+| `vile-iso6-boot-02.png` | `d0a4d0b8…795c` |
+| `vile-iso6-boot-03.png` | `58983643…f69b` |
+| `vile-iso6-boot-04.png` | `dd7867d3…9ef6` |
+| `vile-iso6-boot-05.png` | `05713dba…bd53` |
+| `vile-iso6-boot-06.png` | `f7efb5e2…c90b` |
+| `vile-iso6-boot-07.png` | `7814599d…2a4b` |
+| `vile-iso6-boot-08.png` | `b62234bb…bca8` |
+| `vile-iso6-boot-09.png` | `278216fb…6f54` |
+| `vile-iso6-boot-10.png` | `81be8330…6533` |
+| `vile-iso6-boot-11.png` | `e921d323…e9ea` |
+| `vile-iso6-boot-12.png` | `ed38fde7…ecb8` |
+| `vile-iso6-boot-13.png` | `de920377…2b90` |
+| `vile-iso6-boot-14.png` | `de920377…2b90` |
+| `vile-iso6-boot-15.png` | `9f78c816…dfa7` |
+| `vile-iso6-boot-16.png` | `9f78c816…dfa7` |
+| `vile-iso6-boot-17.png` | `e7769d62…c1f7` |
+| `vile-iso6-boot-18.png` | `574fa5f1…3abd` |
+| `vile-iso6-boot-19.png` | `7f837958…74e4` |
+| `vile-iso6-boot-20.png` | `7f837958…74e4` |
+| `vile-iso6-boot-21.png` | `0ed17d31…825d` |
+| `vile-iso6-boot-22.png` | `0ed17d31…825d` |
+| `vile-iso6-boot-23.png` | `beecbc07…732a` |
+| `vile-iso6-boot-24.png` | `c5a1c43b…996e` |
+| `vile-iso6-boot-25.png` | `cb13dee9…6bc9` |
+| `vile-iso6-boot-26.png` | `c5b08965…b83a` |
+| `vile-iso6-boot-27.png` | `05d90491…2fff` |
+| `vile-iso6-boot-28.png` | `4960e730…581f` |
+| `vile-iso6-boot-29.png` | `3825b365…3178` |
+| `vile-iso6-boot-30.png` | `f257b73f…41ee` |
+| `vile-iso6-boot-31.png` | `d84ebc6b…9394` |
+| `vile-iso6-boot-32.png` | `2ee5e7d4…52a8` |
+| `vile-iso6-boot-33.png` | `53c8d4ad…37ea` |
+| `vile-iso6-boot-34.png` | `ffbf7cd3…7336` |
+| `vile-iso6-boot-35.png` | `98b94f6e…f77f` |
+| `vile-iso6-boot-36.png` | `e66b03fd…5bc3` |
+| `vile-iso6-boot-37.png` | `11f3c2ad…61c6` |
+| `vile-iso6-boot-38.png` | `42ad74ce…7dae` |
+| `vile-iso6-boot-39.png` | `0f9c36f1…010d` |
+| `vile-iso6-boot-40.png` | `f79cc98d…6d3e` |
+| `vile-iso7-boot-01.png` | `f9274a43…5d27` |
+| `vile-iso7-boot-02.png` | `346e8b34…2fa5` |
+| `vile-iso7-boot-03.png` | `dd7867d3…9ef6` |
+| `vile-iso7-boot-04.png` | `083e338f…4446` |
+| `vile-iso7-boot-05.png` | `9ce42d56…61c7` |
+| `vile-iso7-boot-06.png` | `195f4036…3269` |
+| `vile-iso7-boot-07.png` | `be5e9e29…7952` |
+| `vile-iso7-boot-08.png` | `be5e9e29…7952` |
+| `vile-iso7-boot-09.png` | `0d1836a4…9db2` |
+| `vile-iso7-boot-10.png` | `5acbd66b…8780` |
+| `vile-iso7-boot-11.png` | `bc54279f…c79c` |
+| `vile-iso7-boot-12.png` | `dbbe65c2…d47c` |
+| `vile-iso7-boot-13.png` | `277ac00b…6e53` |
+| `vile-iso7-boot-14.png` | `52e9816a…e57f` |
+| `vile-iso7b-boot-01.png` | `3ce89207…7496` |
+| `vile-iso7b-boot-02.png` | `07948414…f079` |
+| `vile-iso7b-boot-03.png` | `dd7867d3…9ef6` |
+| `vile-iso7b-boot-04.png` | `759e2de3…1e03` |
+| `vile-iso7b-boot-05.png` | `bb28acad…267e` |
+| `vile-iso7b-boot-06.png` | `1087dbe5…0c24` |
+| `vile-iso7b-boot-07.png` | `210976c6…0ad9` |
+| `vile-iso7b-boot-08.png` | `628010da…096b` |
+| `vile-iso7b-boot-09.png` | `a557157b…cdef` |
+| `vile-iso7b-boot-10.png` | `c33985aa…eba6` |
+| `vile-iso7b-boot-11.png` | `0e6eabb8…2eb6` |
+| `vile-iso7b-boot-12.png` | `32d570ec…a9ad` |
+| `vile-iso7b-boot-13.png` | `698719bf…609a` |
+| `vile-iso7b-boot-14.png` | `64a82e53…889a` |
+| `vile-iso7b-boot-15.png` | `750b313a…0446` |
+| `vile-iso7b-boot-16.png` | `750b313a…0446` |
+| `vile-iso7b-boot-17.png` | `6ba7cd14…f478` |
+| `vile-iso7b-boot-18.png` | `ea36fb0f…48a6` |
+| `vile-iso7b-boot-19.png` | `d1231a03…0e5f` |
+| `vile-iso7b-boot-20.png` | `3abd0a71…ff96` |
+| `vile-iso7b-boot-21.png` | `b2e2beb8…7675` |
+| `vile-iso7b-boot-22.png` | `22f98658…f786` |
+| `vile-iso7b-boot-23.png` | `b13557f4…e7cf` |
+| `vile-iso7b-boot-24.png` | `864cee9b…0e98` |
+| `vile-iso7b-boot-25.png` | `859025e7…df36` |
+| `vile-iso7b-boot-26.png` | `75707ff2…4197` |
+| `vile-iso7b-boot-27.png` | `d9f5bdb0…7b91` |
+| `vile-iso7b-boot-28.png` | `7c31f6fe…b9ee` |
+| `vile-iso7b-boot-29.png` | `7c31f6fe…b9ee` |
+| `vile-iso7b-boot-30.png` | `f0ca9e44…d8d0` |
+| `vile-iso7b-boot-31.png` | `883a4253…2a05` |
+| `vile-iso7b-boot-32.png` | `bbf844b8…20d2` |
+| `vile-iso7b-boot-33.png` | `4a4dae47…d9a3` |
+| `vile-iso7b-boot-34.png` | `3cad325e…bfb0` |
+| `vile-iso7b-boot-35.png` | `acba8fb8…0b9f` |
+| `vile-iso7b-boot-36.png` | `311fd6bb…0040` |
+| `vile-iso7b-boot-37.png` | `3ae3e460…d748` |
+| `vile-iso7b-boot-38.png` | `662198a2…936a` |
+| `vile-iso7b-boot-39.png` | `86e6fea2…8926` |
+| `vile-iso7b-boot-40.png` | `1feadc0b…3fac` |
+| `vile-iso7b-boot-41.png` | `c6558be2…f49c` |
+| `vile-iso8-boot-01.png` | `1079405a…7fda` |
+| `vile-iso8-boot-02.png` | `220a0523…f124` |
+| `vile-iso8-boot-03.png` | `4636bd00…fece` |
+| `vile-iso8-boot-04.png` | `8069fc28…88c1` |
+| `vile-iso8-boot-05.png` | `67f9be23…6782` |
+| `vile-iso8-boot-06.png` | `afa1ae3d…6ffa` |
+| `vile-iso8-boot-07.png` | `c1d8491b…6d4b` |
+| `vile-iso8-boot-08.png` | `38f96709…f8cd` |
+| `vile-iso8-boot-09.png` | `b799479a…3af5` |
+| `vile-iso8-boot-10.png` | `916ee5cc…add4` |
+| `vile-iso8-boot-11.png` | `955cd7d0…65ba` |
+| `vile-iso8-boot-12.png` | `ada3d680…804b` |
+| `vile-iso8-boot-13.png` | `34a34a56…f905` |
+| `vile-iso8-boot-14.png` | `85dfa41c…1283` |
+| `vile-iso8-boot-15.png` | `362b46ed…0c53` |
+| `vile-iso8-boot-16.png` | `3fd9c32c…cc67` |
+| `vile-iso8-boot-17.png` | `6d5ae993…7195` |
+| `vile-iso8-boot-18.png` | `f17160e7…2601` |
+| `vile-iso8-boot-19.png` | `ddceabd7…3de4` |
+| `vile-iso8-boot-20.png` | `622552d4…0f63` |
+| `vile-iso8-boot-21.png` | `0d354b0a…9920` |
+| `vile-iso8-boot-22.png` | `b4692641…fdda` |
+| `vile-iso8-boot-23.png` | `4e8a9625…d406` |
+| `vile-iso8-boot-24.png` | `dae49e47…f86f` |
+| `vile-iso8-boot-25.png` | `75deccbe…5d18` |
+| `vile-iso8-boot-26.png` | `942c5b6a…a8c9` |
+| `vile-iso8-boot-27.png` | `9bf335da…be65` |
+| `vile-iso8-boot-28.png` | `050b8b38…e556` |
+| `vile-iso8-boot-29.png` | `c5535d1b…9d45` |
+| `vile-iso8-boot-30.png` | `c5535d1b…9d45` |
+| `vile-iso8-boot-31.png` | `38d20b0c…65d5` |
+| `vile-iso8-boot-32.png` | `ac631952…1ecf` |
+| `vile-iso8-boot-33.png` | `b17e26e3…18e4` |
+| `vile-iso8-boot-34.png` | `47b0a2fc…88b0` |
+| `vile-iso8-boot-35.png` | `0776de0c…4c09` |
+| `vile-iso8-boot-36.png` | `436706c0…7a63` |
+| `vile-iso8-boot-37.png` | `afc528ad…9390` |
+| `vile-iso8-boot-38.png` | `96bc7e8e…d76e` |
+| `vile-iso8b-boot-01.png` | `d2741e8d…5dac` |
+| `vile-iso8b-boot-02.png` | `58983643…f69b` |
+| `vile-iso8b-boot-03.png` | `6750af0a…ea51` |
+| `vile-iso8b-boot-04.png` | `2feb55ab…1009` |
+| `vile-iso8b-boot-05.png` | `b290352c…71d9` |
+| `vile-iso8b-boot-06.png` | `3cfcf07b…fe79` |
+| `vile-lock-01.png` | `80494bce…e744` |
+| `vile-lock-02.png` | `591bdd30…f0cc` |
+| `vile-lock-03.png` | `97cc6595…d7ee` |
+| `vile-lock-10.png` | `80494bce…e744` |
+| `vile-lock-11.png` | `591bdd30…f0cc` |
+| `vile-lock-12.png` | `76cf8d2e…b9f0` |
+| `vile-lock-13.png` | `9f80b4b3…9311` |
+| `vile-logo-01-bare.png` | `2bc29bce…ccf0` |
+| `vile-logo-02-other.png` | `5f96ea37…71aa` |
+| `vile-logo-03-window-over.png` | `d809476e…b0ec` |
+| `vile-look-01-1280x800.png` | `4069d37d…6b36` |
+| `vile-look-01.png` | `f2e6662f…9de1` |
+| `vile-look-02.png` | `55d12095…83fe` |
+| `vile-look-03.png` | `6428502b…fe4e` |
+| `vile-look-menu-final.png` | `299703c9…4ecc` |
+| `vile-look-menu.png` | `4fcce45d…47ad` |
+| `vile-look-settings-alone.png` | `bdb8ec52…3ba1` |
+| `vile-look-settings.png` | `a504bdd8…f877` |
+| `vile-screen-01.png` | `e585a996…5e5a` |
+| `vile-screen-02.png` | `09e3225d…a25b` |
+| `vile-screenfit-01.png` | `bf19713c…89b0` |
+| `vile-screenfit-02.png` | `39cc1c43…3ff6` |
+| `vile-settings-01.png` | `e927b2ec…ac59` |
+| `vile-settings-02.png` | `4fdb2089…ba22` |
+| `vile-settings-03-unlocked.png` | `daa1bdea…7332` |
+| `vile-settings-03.png` | `d7182a6b…f8bb` |
+| `vile-settings-04.png` | `0bc6a638…e2ed` |
+| `vile-settings-picker-open.png` | `dee80b6c…fc37` |
+| `vile-settings-picker.png` | `89f9e02a…d824` |
+| `vile-settings-remove-probe.png` | `1a203d6b…7f88` |
+| `vile-settings-run-setup-01.png` | `8f8effc1…ef93` |
+| `vile-settings-run-setup-02.png` | `bcd8d814…fc6c` |
+| `vile-settings-run-setup-03.png` | `99f178da…f84a` |
+| `vile-setup-01-welcome.png` | `3b745834…9982` |
+| `vile-setup-02-name.png` | `313076dd…c0da` |
+| `vile-setup-03-picker-open.png` | `fb96c396…5174` |
+| `vile-setup-04-name-picture.png` | `29248f39…dfe8` |
+| `vile-setup-05-wallpaper.png` | `219b9246…1a8b` |
+| `vile-setup-06-wallpaper-nebula.png` | `10ad3602…9eda` |
+| `vile-setup-06b-theme.png` | `ae2c1690…a325` |
+| `vile-setup-06c-theme-light.png` | `4a032643…fc2b` |
+| `vile-setup-07-apps.png` | `9832e912…e80e` |
+| `vile-setup-08-timezone.png` | `99e60226…27ff` |
+| `vile-setup-09-done.png` | `462e0e18…857a` |
+| `vile-setup-10-installing.png` | `65cf6978…e3b9` |
+| `vile-setup-11-installing-done.png` | `2f486745…bff7` |
+| `vile-setup-12-desktop.png` | `7096aef0…e351` |
+| `vile-setup-13-lock.png` | `de95b736…b80c` |
+| `vile-setup-14-unlocked.png` | `9bca05e6…910a` |
+| `vile-setup-15-second-boot.png` | `9bca05e6…910a` |
+| `vile-system-00-top.png` | `2075c7c4…3733` |
+| `vile-system-01-gauges.png` | `9cd49545…6305` |
+| `vile-system-01-layout.png` | `3c13e407…d469` |
+| `vile-system-02-cpu.png` | `1c23349b…4e8f` |
+| `vile-system-02-hardware.png` | `0aef7886…6903` |
+| `vile-system-03-load.png` | `a43fd806…c411` |
+| `vile-system-03-net-a.png` | `47239297…50f0` |
+| `vile-system-03-net-b.png` | `f8c41573…12c1` |
+| `vile-system-04-idle-again.png` | `c735c21f…ba03` |
+| `vile-system-04-load.png` | `87097ee2…67e3` |
+| `vile-system-05-idle-again.png` | `8699bd1f…66ba` |
+| `vile-theme-01-dark.png` | `4b6da9ee…0955` |
+| `vile-theme-02-light.png` | `53596d13…9f06` |
+| `vile-theme-02b-live-dark.png` | `4b6da9ee…0955` |
+| `vile-theme-02c-live-light.png` | `53596d13…9f06` |
+| `vile-theme-02d-light-foot.png` | `7e1f8a98…c391` |
+| `vile-theme-03-light-menu.png` | `df53a8ce…c49f` |
+| `vile-theme-04-light-lock.png` | `33551b49…ecaa` |
+| `vile-theme-05-light-unlocked.png` | `d07ddd95…54a8` |
+| `vile-theme-06-settings-dark.png` | `ab84c110…851c` |
+| `vile-theme-07-settings-light.png` | `80b7dfef…7c76` |
+| `vile-theme-08-light-1280x800.png` | `debf9d61…3083` |
+| `vile-tiling-01.png` | `4c838af3…be2c` |
+| `vile-tiling-02.png` | `55c403b0…3926` |
+| `vile-tiling-03.png` | `3b8507c2…0fe8` |
+| `vile-tiling-fullscreen.png` | `d86bd350…2bbf` |
+| `vile-tiling-restored.png` | `3b8507c2…0fe8` |
+| `vile-tiling-retile.png` | `a44e8daf…d2dc` |
+| `vile-tiling-wallpaper-nebula.png` | `369f0d74…c037` |
+| `vile-wallpaper-01.png` | `3c98ff9c…2fee` |
+| `vile-wallpaper-02.png` | `3c98ff9c…2fee` |
+| `vile-wallpaper-03.png` | `a623c918…660d` |
+| `vile-wizard-enter-01-welcome.png` | `f0954527…6c79` |
+| `vile-wizard-enter-02-after-one-enter.png` | `116c541f…52e6` |
+| `vile-wizard-enter-03-after-two-enters.png` | `7f8fe3b8…d563` |
+| `vile-wizard-step3-01.png` | `7424fa1e…a8b6` |
+
+_403 files. This table is the single source of truth for
+screenshot shas — older per-section values in this log are
+history and may not match disk._
+
+---
+
+## 0.5.6 — purple cursor + KDE launch jump (Nov 11, 2026, agent a1891e6f)
+
+Adnan's direction Nov 10 ~22:52 EST (purple arrow image): set the
+purple arrow as the main cursor, KDE-Plasma-style jumping dock icon
+while an app loads, desktop icons next (NOT in this job).
+
+### Cursor theme (XCursor, built from source PNG)
+- Source: `assets/cursor-purple-arrow.png` (#C574FE, 213x213,
+  hotspot tip (8,8)). Builder `assets/build-cursor-theme.py`
+  (xcursorgen is NOT available in this VM or via apt — Python
+  XCursor writer; format verified against wlroots 0.19.3
+  `xcursor/xcursor.c`: magic 0x72756358, TOC, image chunks type
+  0xfffd0002, chunk header field 36, premultiplied ARGB32).
+- **Magic bug (Nov 11 ~04:1x):** the builder wrote magic
+  `0x58637572` (ASCII "Xcur" read big-endian) — the file started
+  with bytes `72 75 63 58` ("rucX") and wlroots rejected it, so the
+  theme loaded 0 cursors and the cursor was INVISIBLE (not even the
+  built-in white arrow: `cursor_output_cursor_update` sets the
+  buffer to NULL when both the named and "default" lookups miss).
+  Fixed to `0x72756358` (file starts `58 63 75 72`); the builder's
+  own verify used the same wrong constant, so it passed until a
+  strict parser replicating wlroots' reader caught it.
+- Output `assets/cursor-theme/vile/`: `cursors/default`,
+  `cursors/left_ptr`, `cursors/pointer` (identical, 6512 bytes each),
+  `index.theme` (`[Icon Theme] Name=Vile`). Sizes 24 + 32, hotspot
+  (1,1) at both (scaled from source (8,8) by 8/213).
+  **Current sha: `83baed448ca05873986fd3a396b0661e4a54c269edc0fc2e52d37a0e0b7fae74`**
+  (old bad-magic file was `d8471d71…`).
+- Compositor (main.c): `vile_cursor_theme_available()` helper
+  (searches XCURSOR_PATH, then `~/.icons`, `~/.local/share/icons`,
+  `/usr/share/icons` for `vile/cursors/default`); init tries
+  `wlr_xcursor_manager_create("vile", 24)` first with an INFO log,
+  else falls back to `create(NULL, 24)` with an ERROR log
+  ("falling back to system default cursor"). **Bug fixed Nov 11:**
+  the helper fell through to the default dirs even when
+  XCURSOR_PATH was set — wlroots' `xcursor_library_path()` returns
+  XCURSOR_PATH ALONE when set, so the helper now returns false
+  after the XCURSOR_PATH search (otherwise the fallback test could
+  never trigger). Non-pointer shapes (resize/text) left on system
+  defaults for now.
+- `vile-install.sh`: cursor-theme install block (copies
+  `assets/cursor-theme/vile/cursors` + `index.theme` →
+  `/usr/share/icons/vile`, sudo; graceful note if missing; copies
+  CONTENTS, not the dir, to avoid the nesting trap). **cp -r
+  nesting trap (hit twice Nov 11):** `cp -r cursor-theme/vile
+  /usr/share/icons/vile` when the dest already exists creates
+  `/usr/share/icons/vile/vile/` — always `rm -rf` the dest first,
+  or copy contents into the existing dir.
+- ISO stages the theme at `archiso/airootfs/usr/share/icons/vile/`
+  (sha 83baed44 verified). The publish-tree copy of
+  `vile-install.sh` does NOT yet have the cursor block — the parent
+  must sync it (0.5.6 publish sync list, below).
+
+### Launch jump (KDE-style, + circle-spin loader overlay)
+- main.c: `int64_t dock_launch_ms[DOCK_APP_COUNT]`; `cairo_surface_t
+  *shell_spin_frames[53]` + `int shell_spin_n`.
+- Defines: `VILE_LAUNCH_TIMEOUT_MS 5000`, `VILE_LAUNCH_JUMP_MS
+  500`, `VILE_SPIN_MAX 53` (placed BEFORE the animation tick — an
+  early build failed with `'VILE_LAUNCH_TIMEOUT_MS' undeclared`
+  because the defines sat after the tick at line ~4342).
+- `vile_launch_jump_ms()` reads `VILE_LAUNCH_JUMP_MS` env
+  (100–10000, default 500) — test-only override.
+- Tick (`vile_anim_tick`, after the dock hover/pop block): per app,
+  if launching: stop with "launch done" log when
+  `vile_dock_launch_appeared` is true, or "launch timeout" log at
+  the timeout (overridable via `VILE_LAUNCH_TIMEOUT_MS` env); sets
+  `active=true` and re-renders the dock while any icon bounces.
+- Render (`vile_shell_render_dock` icon loop): launching icon's y
+  offset by `14.0 * sin(PI * phase)`, phase = (elapsed % period) /
+  period — one bounce per 500ms, 14px peak (fits the pill's 20px
+  top margin; icon top reaches y=18 at peak); spinner overlay:
+  current circle-spin frame as a **purple mask** (reads in both
+  themes — raw white frames would vanish on the light dock), 28px,
+  centred on the jumped icon, 30fps (`(el/33) % spin_n`).
+- Helpers: `vile_shell_load_spin_frames` (lazy, tries
+  `../assets/loaders/circle-spin/frame-%03d.png` then `assets/...`,
+  up to 53); `vile_shell_dock_launch_start` (skips if
+  `VILE_ANIM_OFF=1` or already launching);
+  `vile_dock_launch_appeared` (title matching like the 1s dock
+  refresh: foot / Settings / ScreenFit / "Vile Setup" for the
+  wizard, `app_files` for Files, case-insensitive).
+- `vile_shell_dock_activate_app`: re-click guard at the top — a
+  second click while the app is still launching just pops the icon
+  (via `vile_dock_slot_of_app` + `vile_anim_dock_pop`), no
+  duplicate spawn; `vile_shell_dock_launch_start` called in every
+  spawn branch (foot, Settings, ScreenFit, Files, Setup) but NOT on
+  the focus-existing-window paths.
+- Spin frames destroyed at shutdown next to the foot/files icon
+  destroys.
+- **Current main.c sha: `c47588d7a51ecc3d`**
+
+### Version 0.5.6 bumps (live tree)
+- `compositor/meson.build` version '0.5.6';
+  `compositor/vile-foot.sh` banner v0.5.6;
+  `settings/vile-settings.py` About "Compositor v0.5.6";
+  `setup/vile-setup.py` VERSION "0.5.6" + marker `vile-setup 0.5.6`;
+  `archiso/profiledef.sh` iso_version="0.5.6";
+  `archiso/airootfs/root/VILE-README.txt` rewritten for 0.5.6
+  (purple cursor + launch jump mentions; hardware-gate paragraph
+  updated).
+
+### Toolchain recovery (Nov 11 ~04:07 EST — VM reset wiped /usr/local)
+- Reinstalled: `grim`, `foot`, `python3-gi`, `python3-gi-cairo`,
+  `python3-cairo`, `libgtk-3-0`, `gir1.2-gtk-3.0`,
+  `gir1.2-gdkpixbuf-2.0`, `python3-pil`, `wtype`, `ydotool`,
+  `qemu-system-x86` (8.2.2); PAM headers copied from the Arch
+  chroot + `libpam.so → libpam.so.0` symlink; `libxml2.so →
+  libxml2.so.2` symlink + headers from chroot; Wayland 1.24.0 and
+  pixman 0.46.4 reinstalled from `toolchain-src/*/build`;
+  wayland-protocols data copied from chroot + hand-written
+  `wayland-protocols.pc` (Version 1.44); `hwdata` `pnp.ids` copied
+  from chroot; apt `apt-get update` hung on the cogentco mirror —
+  removed it (backup `/etc/apt/sources.list.d/ubuntu.sources.bak`),
+  azure mirror only; apt installed `libdrm-dev libinput-dev
+  libseat-dev libgbm-dev libegl-dev libgles-dev libdisplay-info-dev
+  libpam0g-dev libxml2-dev hwdata`.
+- wlroots 0.19.3 rebuilt: `sudo env PATH=... HOME=/home/hatch
+  PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig ninja
+  -C build install` + `sudo ldconfig` → `pkg-config --modversion
+  wlroots-0.19` = 0.19.3. Compositor builds clean (only
+  pre-existing warnings).
+- **pkill footgun (repeated Nov 11):** never `pkill -f` with a
+  pattern string that appears in your own shell command line (it
+  matches and kills your own exec session). Use `pkill -x <name>`.
+
+### New harness: run-cursor-jump-test.sh
+- `compositor/tests/run-cursor-jump-test.sh` (executable):
+  `[OUT_W OUT_H]` (default 1920x1080); 5 phases — (1) purple
+  cursor: count pixels within ±15 of #C574FE (197,116,254) in a
+  30×30 box at the pointer after `vptr_test` move to (400,300) vs
+  baseline, expect ≥50 and greater than baseline, plus the strict
+  log line "cursor theme 'vile' (purple arrow)"; (2) jump: hover
+  Files icon first (rest pose WITH hover grow), click, 5 grim
+  shots, icon bright-pixel CENTROID in the pill box (x cx±28, y
+  cy-40..cy+28, running-dot row excluded) must move up ≥8px in at
+  least one; (3) jump stops: "launch done 'files'" log, icon back
+  at rest (±3px), Files window open; (4) re-click guard:
+  double-click Settings while launching → exactly ONE "dock: open
+  Settings" line; (5) fallback: `XCURSOR_PATH=/tmp/vile-empty-cursors`
+  → "falling back to system default cursor" log + compositor still
+  runs, using its OWN log file (the first version overwrote the
+  main log — fixed). Sets `WLR_NO_HARDWARE_CURSORS=1` (headless
+  software cursor) and `VILE_LAUNCH_JUMP_MS=500` (shipped default).
+- **Slow-launch trick (test-only, no shipped file touched):**
+  `/tmp/vile-slow-python/python3` (sleep 2, exec /usr/bin/python3)
+  prepended to PATH ONLY for the compositor process — Files/Settings
+  launchers call `python3` from PATH, so their windows take ~2.9s
+  to map and the jump is observable with grim's ~0.75s shots.
+  Without it, Files maps in ~880ms and Settings in ~732ms
+  (measured from the log), too fast to catch.
+- **Measurement lesson:** the first version measured the topmost
+  bright pixel in a band extending 90px above the icon — nebula
+  wisps above the dock polluted it (rest top read 936 for all
+  shots); the centroid-in-the-pill measurement is what works
+  (probe: centroids oscillated 27.9–41.5, a 13.6px range matching
+  the 14px amplitude).
+- **Results (Nov 11 ~04:2x): ALL 10 PASS at 1920x1080 and ALL 10
+  PASS at 1280x800.** 1920x1080: best displacement 9.7px (mid2/mid3
+  centroid 981.3 vs rest 991.0), returns to rest 991.1 vs 991.0;
+  1280x800: best 11.6px, returns 711.0 vs 711.1. Purple cursor:
+  200 pixels in the whole frame at x 400–421, y 301–321. Read by
+  eye: `vile-cursor-01-moved.png` (purple arrow at (400,300) on
+  nebula, frosted dock intact) and `vile-jump-02-mid2.png` (Files
+  folder icon visibly displaced upward above the other dock icons,
+  purple cursor overlapping it).
+- Earlier failing runs and their causes: (a) grim not on PATH
+  (reset wiped it) — shots missing; (b) `foot: not found` (reset
+  wiped it) — foot never spawned, jump ran to the 5s timeout
+  (which itself proved the timeout path: "launch timeout 'foot'
+  (5014ms)"); (c) `ModuleNotFoundError: No module named 'gi'` then
+  `ValueError: Namespace Gtk not available` — Files/Settings
+  crashed on launch, jump timed out; fixed by reinstalling
+  python3-gi + GTK3 typelibs; (d) harness phase-1 grep matched the
+  fallback line too ("cursor theme 'vile'") — now strict on
+  "(purple arrow)".
+- **Headless frame rate / grim timing (Nov 11):** headless commits
+  at ~21fps (frame 1 at 0.402s, frame 120 at 6.091s in the jump
+  probe); `grim` takes ~0.75s per shot on this 1.5-CPU VM, so
+  "rapid" shots are ~750ms apart. **Headless cursor:** the
+  headless backend's `output_set_cursor`/`output_move_cursor` are
+  no-ops — the cursor never reaches a grim frame unless the
+  software cursor is forced with `WLR_NO_HARDWARE_CURSORS=1`
+  (test env only; the Dell uses the DRM backend, where the cursor
+  is real either way).
+
+### Regression — ALL PASS (0.5.6 binary, Nov 11 ~04:2x–04:5x)
+- Batch A: files, files-11, files-11-test2, files-12, files-13,
+  theme, dock-files, wallpaper — all exit 0. First run had 3
+  failures, all environment-caused: files FAIL "Drafts was not
+  created" + files-12 FAIL "Bundle.zip contents wrong" (both
+  because `wtype` was wiped — reinstalled, both pass on re-run);
+  files-13 exit 126 "Permission denied" (lost +x bit — `chmod +x`,
+  passes on re-run). Fixture `/tmp/vile-test-avatar.jpg` was wiped
+  by the reset — regenerated (512x512 purple #6D4AFF, white bold
+  "AD").
+- Batch A3: lock, lock-redesign, lock-settings, screenfit, banner,
+  settings, settings-picker, setup — all exit 0. **system-test
+  FAILED first:** `/tmp/vile-sysmon-build/build/vile: No such file
+  or directory` — the test pipes `meson setup... | tail -2` and
+  `ninja... | tail -2`, so the pipeline exit code is tail's (0)
+  and a meson failure is masked. Root cause: the test never puts
+  `$REAL_HOME/.local/bin` on PATH (run-setup-test.sh does), so
+  `meson` isn't found under the scratch HOME. **Fixed in the
+  harness:** added `export PATH="$REAL_HOME/.local/bin:$PATH"` +
+  `set -o pipefail` in the build subshell — then exit 0.
+- Batch B: drag, dock (ALL 14 PASS), look, look-1280x800, input,
+  tiling, anim, dock-hold (ALL 6 PASS), dock-hold-1280x800 (ALL 6
+  PASS), dock-frost, wizard-enter, setup re-run — all exit 0.
+  (dock-test first failed with 126 "Permission denied" — lost +x
+  bit from the reset; `chmod +x run-*.sh` fixed it, re-run passes.)
+
+### ISO staging (0.5.6)
+- New script `build-env/stage-0.5.6.sh` (reproducible staging —
+  `cp -r` of whole dirs, NO trailing slashes). **Staging accident
+  Nov 11 ~04:3x (twice):** a `rsync -a --delete` with trailing
+  slashes on the source dirs merged directory CONTENTS into
+  `archiso/airootfs/root/vile-os/` instead of copying the dirs,
+  and `--delete` removed `vile-install.sh` from the staging dir.
+  Rebuilt cleanly per `archiso/build-iso.sh`; the script now
+  exists so this cannot recur.
+- Staged main.c sha == live (`c47588d7…`); staged cursor theme ==
+  live (83baed44), including the airootfs copy; staged
+  vile-install.sh has the cursor block (3 mentions). Chroot profile
+  synced: `rsync -a --delete archiso/
+  build-env/root.x86_64/root/vile-iso/`, `diff -r` clean; chroot
+  staged main.c matches live.
+- Verify script: `build-env/verify-sfs12.sh` (adapted from
+  verify-sfs11.sh): extract dir /tmp/extract12, versions 0.5.6,
+  cursor theme sha 83baed44 + first bytes 'Xcur' (both
+  `usr/share/icons/vile/` and `root/vile-os/assets/cursor-theme/vile/`
+  copies), launch-jump code counts, cursor-loading counts,
+  vile-install.sh cursor block, plus all 0.5.5 checks (frost, Log
+  Out, overlay 0, ScreenFit CSS_DARK, Hatch certs 0).
+
+### ISO build 0.5.6 — build21 (SSL), build21b (quota), build21c OK
+- **build21 FAILED (exit 1):** pacman SSL error 19 — the sandbox
+  egress CA rotated AGAIN (current `0C:B0:1E:CB:…`; chroot bundle
+  had four OLD Hatch CAs — 7E:DA:…, 37:BD:8F:38… (the 0.5.5 one),
+  E1:9C:…, B3:A8:… — but not the current one). mkarchiso's
+  pacstrap verifies mirror SSL against the CHROOT's trust store,
+  NOT the host's SSL_CERT_FILE bundle. Fix: copied the current
+  `/run/hatch/egress-tls/hatch-egress-ca.pem` into the chroot's
+  anchors + `chroot update-ca-trust` (bundle now 123 certs,
+  including 0C:B0:…). **Made self-healing:** build12.sh now
+  copies the CURRENT host egress CA into the chroot anchors and
+  runs `update-ca-trust` before building, so the next rotation
+  does not break the build.
+- **build21b FAILED (exit 1):** mksquashfs died at 17% (RC=1) on
+  **disk quota** — the HOME filesystem has a USER quota (df shows
+  52G free but writes fail once headroom is gone; the build peaks
+  at ~6G: 3G airootfs + 1.5G .sfs + 1.5G ISO). Freed: failed
+  build21b work dir (3.2G) + chroot pacman cache (1.1G, 419 pkgs)
+  + stale `~/arch-test` v1 Hyprland chroot (5.7G — eww/paru build
+  dirs, rebuildable; its 19 v1 screenshots preserved in
+  `archive/arch-test-v1/`). **Lesson:** a failed probe leaves a
+  PARTIAL file behind (the 4000MB probe left a 3.3G
+  `probe-4g.bin`) — always `rm -f` the probe file after a failed
+  probe, or the freed space is immediately re-consumed. Also:
+  `~/arch-test` dirs are root-owned read-only (555) in this user
+  namespace — plain `rm -rf` and even `sudo rm -rf` fail with
+  "Permission denied"; `chmod -R u+w` first, then rm.
+- **Quota workaround (Nov 11):** `/run/hatch/resume` is the SAME
+  disk but a different mount, outside the home quota (52G free,
+  writable). build12.sh now bind-mounts
+  `/run/hatch/resume/vile-iso-work` → `$R/tmp/vile-iso-work` and
+  `/run/hatch/resume/vile-iso-out` → `$R/root/vile-iso-out` before
+  mkarchiso (re-established every run — mounts do NOT persist
+  across exec calls). Only the final ISO (1.5G) is copied back to
+  the home. The resume scratch is deleted after the ISO is copied
+  out. (The `/run` dir-bind in build12.sh fails rc=32, so the
+  resume dir is NOT visible inside the chroot via /run — the
+  direct bind-mounts are what make it work.)
+- **build21c SUCCEEDED (MKARCHISO EXIT: 0).**
+- **ISO 0.5.6:** `~/workspace/vile-os/iso/vile-os-0.5.6-x86_64.iso`
+  — 1,494,777,856 bytes, sha256
+  `c1f228ec649a4f19a866b6c6e3bcae45e5a908718f09918779f4befee1280436`,
+  LABEL `VILE_OS`, `/arch/version` = 0.5.6, kernel 7.2.15.
+- **verify-sfs12.sh ALL PASS:** .sfs hash chain MATCHES (sha512
+  `6834f046…` full 128-char match); staged main.c md5 identical
+  to live (`9ea9df53…`); Files/Setup/Settings/ScreenFit md5s
+  identical; foot logos dark b0a9a3ec / master e5a2f29d; banner
+  v0.5.6, meson 0.5.6, Settings "Compositor v0.5.6", Settings
+  VERSION 0.3.0, README "Vile OS 0.5.6"; vile logos 95c3211d /
+  4f3be1cc; cursor theme 83baed44 + 'Xcur' on all three files,
+  index.theme present, all three cursors 6512 bytes; launch-jump
+  + cursor-loading counts all >0; vile-install.sh cursor block
+  present; **Hatch certs in ISO trust store: 0**.
+  (Note: verify-sfs12.sh needs the work/output binds
+  re-established in the same exec — mounts don't persist.)
+
+### QEMU boot test — TWO fresh boots (iso9 + iso9b, 1280x800)
+- **iso9:** boots (archiso hooks, VILE_OS mounted, "Welcome to
+  Arch Linux!"); timezone prompt skipped; root autologin
+  (Arch Linux 7.2.15-arch1-1, `[root@archlinux ~]#` — shot
+  byte-identical to the 0.5.5 prompt screen); `vile` first-run
+  build (~2 min); compositor up — Setup wizard "Welcome to Vile"
+  (7 dots), **purple cursor visible top-left**, frosted dock
+  (5 icons incl. Setup gear), bottom bar "05:50 Wed 11 Nov".
+  Wizard stepped through with Enter (one Enter = one step) to the
+  "Installing your apps" screen; closed with Windows+Q → **bare
+  desktop: nebula wallpaper (random default), CLEAN, no logo,
+  purple cursor, frosted dock (4 icons), bar "05:51 Wed 11 Nov"**.
+- **Gate (a) purple cursor: PROVEN** — visible in every booted-ISO
+  shot (06, 07, 08, jump-01/02/03, files-*, foot-*).
+- **Gate (b) launch jump: PROVEN** — dock click on V (Settings)
+  at (580,727): jump-01 shows the V icon displaced upward;
+  measured V top y = 691 (rest) → **675 (mid-flight, 16px up)**
+  → 688 (back at rest, hover-grown); Settings opened (jump-03/04:
+  Profile Picture + Theme, Dark "✓ Current"). Files dock click:
+  files-04 catches the folder icon mid-jump (displaced up,
+  cursor on it); Files opened (files-06/07: Home sidebar, folder
+  grid Desktop/Documents/Downloads, "8 items • 248.6 MB free of
+  256.0 MB on /", running dots under V and Files).
+  ScreenFit also opened from a dock click (files-03: dark mode,
+  sliders +5.0%).
+- **Gate (c) first-session dock clicks: PROVEN** — in iso9, the
+  first dock clicks opened Settings, ScreenFit, and Files. In
+  iso9b, the first dock click opened Settings.
+- **iso9b:** boots; wizard "Welcome to Vile", purple cursor,
+  5-icon dock; closed with Windows+Q → **bare desktop: Purple
+  Arch wallpaper (random default — session 1 got nebula, session
+  2 got Purple Arch, so the random pick works), purple cursor,
+  frosted dock (5 icons), bar "06:04 Wed 11 Nov"**. Foot opened
+  via Windows+Enter (banner "VILE OS · v0.5.6", dark terminal,
+  prompt `[root@archlinux compositor]#`). Settings opened from a
+  dock click (settings-01).
+- **QEMU mouse tool (new):** `build-env/qglide3.py` — copy of
+  qglide2.py with a purple-aware cursor test (`is_cursor_px`:
+  white OR #C574FE purple) and the size cap raised 120/200 → 400
+  (the QEMU cursor cluster is ~223px, over the old cap). qglide2's
+  white-only finder cannot track the purple cursor. **Limitation:**
+  the differ cannot track the purple cursor over the light-purple
+  Arch logo (it blends in) — the glide loses it there; retry from
+  a dark area. Use qglide3.py for future QEMU runs, NOT qglide2.py.
+- **OPEN (QEMU-observed, Nov 11):** in iso9b, three dock clicks
+  on the foot icon (at (535,687), (541,689), (540,695) — all
+  on-target per the glide, icon jumped each time) did NOT open
+  foot, while Settings/Files/ScreenFit dock clicks worked in iso9
+  and Settings worked in iso9b, and foot opens fine via
+  Windows+Enter in the same ISO. The headless dock harness passes
+  14/14 including foot on this exact binary, and the dock foot
+  path and the keybind path both go through `vile_spawn_foot()`
+  (they cannot drift). The clicks landed at the foot/V icon
+  boundary (x 535–541; foot spans 512–550, V spans 584–623), so
+  this may be a QEMU mouse-precision artifact (click landing in
+  the inter-icon gap) rather than a Vile bug — but it is NOT
+  proven either way. Needs a Dell check (first-session foot dock
+  click) or a headless re-probe. Do NOT treat it as a 0.5.6
+  blocker: the 0.5.6 gates (cursor + jump + first-session dock
+  clicks) are all proven above.
+
+### 0.5.6 publish sync (for the parent — do NOT push, needs Adnan's tap)
+- Live tree → publish tree must include: fixed main.c
+  (`c47588d7…`), version bumps (meson/banner/Settings/wizard/
+  profiledef), README version, `assets/build-cursor-theme.py`,
+  `assets/cursor-theme/vile/*` (BINARY — browser-upload route,
+  like other binaries), `vile-install.sh` cursor block,
+  `compositor/tests/run-cursor-jump-test.sh`,
+  `archiso/airootfs/usr/share/icons/vile/*`, `build-env/qglide3.py`,
+  `build-env/stage-0.5.6.sh`, `build-env/verify-sfs12.sh`.
+- Also sync: `build-env/build12.sh` (CA self-healing + resume
+  bind-mounts), `compositor/tests/run-system-test.sh` (PATH +
+  pipefail fix).
+- **Do NOT delete the 0.5.3 or 0.5.5 ISOs.** Desktop icons are
+  the NEXT piece after 0.5.6. Task manager is LAST.

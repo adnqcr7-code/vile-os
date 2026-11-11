@@ -4,11 +4,17 @@ A custom Arch-based OS with a **from-scratch wlroots compositor** — no Hyprlan
 no prebuilt desktop. Dark, minimal, purple. Built piece by piece, each piece
 visually tested before the next one started.
 
-- **v0.5.3** (this repo): proven — boots in QEMU, first-run Setup wizard,
-  frosted bottom bar, floating dock, Settings, Files, lock screen with real
-  PAM unlock, live wallpaper switching, random default wallpaper, Arch logo
-  overlay.
-- **v0.5.4** (in progress): light/dark theme + System monitor in Settings.
+- **v0.5.6** (this repo): light/dark theme (asked in Setup, switchable in
+  Settings), System monitor in Settings (CPU / memory / disk / network /
+  GPU), draggable + resizable windows, working minimize/maximize,
+  frosted glass dock (hold to reorder, right-click to unpin), purple
+  cursor (Adnan's arrow, the default pointer), KDE-style launch jump on
+  the dock (the icon bounces while its app loads), no Arch logo stamped
+  on wallpapers, Vile in the LightDM session list, Log Out in the
+  system menu.
+- **v0.5.3**: proven — boots in QEMU, first-run Setup wizard, frosted
+  bottom bar, floating dock, Settings, Files, lock screen with real PAM
+  unlock, live wallpaper switching, random default wallpaper.
 
 ## Install on Arch (the Dell)
 
@@ -31,8 +37,13 @@ that's **Ctrl+Alt+Fn+F2**), log in, and run:
 vile
 ```
 
-First run opens the Setup wizard: name, profile picture, wallpaper, apps,
-timezone. Give it your sudo password once for the app installs.
+First run opens the Setup wizard: name, profile picture, wallpaper, theme,
+apps, timezone. Give it your sudo password once for the app installs.
+
+The install also adds **Vile to the login screen**: at the LightDM greeter,
+pick "Vile" from the session list to log into Vile, or pick Cinnamon /
+Hyprland to go back to your other desktop. Inside Vile, Log Out in the
+system menu (bottom bar, right side) takes you back to the greeter.
 
 ## Build the bootable ISO
 
@@ -44,7 +55,7 @@ sudo bash ./build-iso.sh
 ```
 
 Writes the ISO to `/tmp/vile-iso-out/`. Write it to USB
-(`sudo dd if=vile-os-0.5.3-x86_64.iso of=/dev/sdX bs=4M status=progress`)
+(`sudo dd if=vile-os-0.5.6-x86_64.iso of=/dev/sdX bs=4M status=progress`)
 and boot it.
 
 ## Keys
@@ -52,6 +63,11 @@ and boot it.
 - **Windows+Enter** new terminal · **Windows+Q** close
 - **Windows+J / K** move focus · **Windows+F** fullscreen
 - **Windows+Escape** clear focus · **Windows+L** lock
+- Drag a window by its title bar (or hold **Windows** and drag anywhere on
+  it); drag an edge/corner to resize. Minimize/maximize buttons work;
+  minimized windows come back from the dock.
+- Dock: hold an icon to drag it left/right and reorder; right-click an icon
+  to unpin it.
 
 ## Layout
 
@@ -69,10 +85,10 @@ and boot it.
 
 ## Known issues
 
-- **First-boot dock/bar clicks may not respond in the first session**
-  (seen twice in QEMU; worked after restarting the desktop with
-  `pkill -x vile && vile`). If it happens on real hardware, that's the
-  bug to fix first — check it before anything else on the Dell run.
+- **First-boot dock clicks are fixed in 0.5.5** (the cause was a 400ms hold
+  timer eating slow clicks; dock clicks now work in the first session in
+  QEMU). One open item from QEMU: a foot dock click needed a second try
+  once (iso9b) — worth checking on the first Dell run of 0.5.6.
 - The wizard's real Arch app installs are unproven until a Dell run
   (only the dry-run command log is proven).
 - Volume slider is visual-only headless; menu blur is a frosted look,

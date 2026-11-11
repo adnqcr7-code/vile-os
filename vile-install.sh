@@ -95,11 +95,40 @@ sudo cp "$REPO_DIR/compositor/pam.d/vile" /etc/pam.d/vile
 if [ -f "$REPO_DIR/assets/foot.desktop" ]; then
   sudo cp "$REPO_DIR/assets/foot.desktop" /usr/share/applications/foot.desktop
 fi
+# Wayland session entry (0.5.4 post-theme fix — session switching):
+# LightDM lists "Vile" at the login screen next to Cinnamon, so
+# desktops can be switched there without a console.
+sudo mkdir -p /usr/share/wayland-sessions
+sudo tee /usr/share/wayland-sessions/vile.desktop > /dev/null <<'VILEDESKTOP'
+[Desktop Entry]
+Name=Vile
+Comment=Vile OS — custom wlroots compositor
+Exec=/usr/local/bin/vile
+Type=Application
+DesktopNames=Vile
+VILEDESKTOP
 if ls "$REPO_DIR"/assets/foot-logo*.png >/dev/null 2>&1; then
   sudo mkdir -p /usr/share/icons/vile
   sudo cp "$REPO_DIR"/assets/foot-logo*.png /usr/share/icons/vile/
 else
   echo "NOTE: foot icons not in the repo yet — the dock will use a fallback."
+fi
+
+# Purple cursor theme (0.5.6 — Adnan's purple arrow is the default
+# pointer). The compositor loads it from the standard icon theme
+# location and falls back to the system default if it is missing.
+if [ -d "$REPO_DIR/assets/cursor-theme/vile" ]; then
+  sudo mkdir -p /usr/share/icons/vile
+  # Copy the theme CONTENTS (cursors/ + index.theme), not the
+  # directory itself — /usr/share/icons/vile already exists from
+  # the foot-logo block above, and cp -r of the dir would nest it
+  # as /usr/share/icons/vile/vile/ where nothing looks for it.
+  sudo cp -r "$REPO_DIR"/assets/cursor-theme/vile/cursors \
+    "$REPO_DIR"/assets/cursor-theme/vile/index.theme \
+    /usr/share/icons/vile/
+  sudo chmod -R a+rX /usr/share/icons/vile
+else
+  echo "NOTE: cursor theme not in the repo yet — the system default cursor will be used."
 fi
 
 echo "== 5/5 ScreenFit =="

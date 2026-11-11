@@ -140,6 +140,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strncasecmp: dock find is case-insensitive */
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
@@ -195,10 +196,31 @@ static void vile_focus_toplevel(struct vile_server *server,
 static void vile_spawn(const char *cmd);
 static const char *vile_wallpaper_path(void);
 static void vile_ensure_default_wallpaper(void);
-static bool vile_load_logo(struct vile_server *server);
-static void vile_fit_logo(struct vile_server *server, int out_w, int out_h);
+static bool vile_theme_path(char *buf, size_t len);
+static bool vile_read_theme(void);
+static void vile_apply_theme(struct vile_server *server, bool light);
+static void vile_lock_reload_bg(struct vile_server *server);
 static void vile_tile(struct vile_server *server);
 static void vile_update_borders(struct vile_server *server);
+/* Interactive move/resize + minimize/maximize (0.5.4 post-theme
+ * fixes): the helpers live next to the xdg request handlers, but
+ * focus/cursor code above them calls them. */
+static void vile_unminimize(struct vile_server *server,
+	struct vile_toplevel *t);
+static void vile_unmaximize(struct vile_server *server,
+	struct vile_toplevel *t);
+static void vile_grab_begin_move(struct vile_server *server,
+	struct vile_toplevel *t);
+static void vile_grab_begin_resize(struct vile_server *server,
+	struct vile_toplevel *t, uint32_t edges);
+static void vile_grab_end(struct vile_server *server);
+static void vile_grab_update(struct vile_server *server);
+/* Pending grab (click-vs-drag): armed on press in the cursor code
+ * above the grab section, fired from the motion path. */
+static void vile_grab_arm(struct vile_server *server,
+	struct vile_toplevel *t, int mode, uint32_t edges);
+static void vile_grab_disarm(struct vile_server *server);
+static bool vile_grab_maybe_fire(struct vile_server *server);
 /* Piece 5 — Vile look (bottom bar, dock). The huge desktop clock
  * was removed Nov 10, 2026 — the bar centre carries the small
  * clock now; the lock clock is separate and untouched. */
@@ -206,11 +228,20 @@ static void vile_shell_create(struct vile_server *server, int out_w, int out_h);
 static void vile_shell_fit(struct vile_server *server, int out_w, int out_h);
 static void vile_shell_raise(struct vile_server *server);
 static void vile_shell_update(struct vile_server *server);
-static bool vile_shell_click(struct vile_server *server, double lx, double ly);
+static bool vile_shell_click(struct vile_server *server, double lx,
+		double ly, uint32_t button);
+static void vile_dock_release(struct vile_server *server);
+static int vile_dock_slot_at(struct vile_server *server, int x, int y);
 static void vile_shell_close_menu(struct vile_server *server);
 static void vile_shell_set_menu(struct vile_server *server, bool open);
 static int vile_shell_timer(void *data);
 static void vile_shell_render_dock(struct vile_server *server);
+/* Launch jump (0.5.6): the tick (defined before the dock section)
+ * needs these. */
+static void vile_shell_dock_launch_start(struct vile_server *server,
+		int app);
+static bool vile_dock_launch_appeared(struct vile_server *server,
+		int app);
 /* Piece 7 — animations + first-run Setup. The animation tick runs
  * in the output frame handler, which is defined before the animation
  * section itself, so it is forward-declared here. */
@@ -222,12 +253,123 @@ static bool vile_box_contains(struct wlr_box *b, int x, int y);
 static void vile_spawn_setup(void);
 static bool vile_setup_needed(void);
 
+/* Launch jump (0.5.6 — KDE Plasma style): one up-down bounce every
+ * 500ms until the app's window maps, or the 5s timeout. Defined
+ * here (before the animation tick) because the tick, the dock
+ * render, and the launch helpers all use them. */
+#define VILE_LAUNCH_TIMEOUT_MS 5000
+#define VILE_LAUNCH_JUMP_MS 500
+#define VILE_SPIN_MAX 53 /* circle-spin loader frames on disk */
+
 /* Vile design tokens (same as the rest of Vile OS). */
 #define VILE_BG_R 0.059f   /* #0F0B1A */
 #define VILE_BG_G 0.043f
 #define VILE_BG_B 0.102f
+
+/* Theme (0.5.4): light/dark through ONE palette struct. Every
+ * shell colour in the compositor comes from here — never a bare
+ * literal in a render function (accent #6D4AFF and the error red
+ * are the same in both themes, so they stay literals). DARK is the
+ * exact 0.5.3 tokens, so dark renders pixel-identical to 0.5.3.
+ * LIGHT is lavender-white with the same purple accent; dark tiles
+ * (dock icons, ScreenFit tile) stay dark in both — app-icon look. */
+struct vile_palette {
+	float bg[3];        /* letterbox behind the wallpaper */
+	float text[3];      /* primary text: 0.93,0.91,0.98 */
+	float text_hi[3];   /* near-white: 0.96,0.95,1.0 (lock clock) */
+	float text2[3];     /* secondary: 0.72,0.69,0.82 */
+	float text3[3];     /* bar date: 0.68,0.65,0.78 */
+	float muted[3];     /* section labels: 0.55,0.52,0.62 */
+	float hint[3];      /* lock hint: 0.54,0.50,0.66 */
+	float status[3];    /* lock bottom status: 0.60,0.58,0.70 */
+	float panel_val[3]; /* menu/panel values: 0.92,0.91,0.95 */
+	float glyph[3];     /* status glyphs: 0.9,0.9,0.95 */
+	float date_hi[3];   /* lock date: 0.79,0.75,0.95 */
+	float close_x[3];   /* panel close x: 0.85,0.84,0.9 */
+	float white[3];     /* solid white (password dots/knob): white */
+	float edge[3];      /* hairlines: white in dark, dark in light */
+	float panel_rgb[3]; /* card/pill rgb: 0.05,0.035,0.09 */
+	float bar_rgb[3];   /* bar tint rgb: 0.06,0.04,0.11 */
+	float field_rgb[3]; /* input field rgb: 0.04,0.03,0.08 */
+	float dim_rgb[3];   /* lock dim rgb: 0.04,0.03,0.07 */
+	float tile_rgb[3];  /* dark icon tiles: 0.09,0.07,0.16 */
+	float border_dim[3];/* unfocused border: 0.25,0.24,0.33 */
+	float shadow[4];    /* drop shadows: black 0.35 */
+};
+static const struct vile_palette VILE_PALETTE_DARK = {
+	.bg = { 0.059f, 0.043f, 0.102f },
+	.text = { 0.93f, 0.91f, 0.98f },
+	.text_hi = { 0.96f, 0.95f, 1.0f },
+	.text2 = { 0.72f, 0.69f, 0.82f },
+	.text3 = { 0.68f, 0.65f, 0.78f },
+	.muted = { 0.55f, 0.52f, 0.62f },
+	.hint = { 0.54f, 0.50f, 0.66f },
+	.status = { 0.60f, 0.58f, 0.70f },
+	.panel_val = { 0.92f, 0.91f, 0.95f },
+	.glyph = { 0.9f, 0.9f, 0.95f },
+	.date_hi = { 0.79f, 0.75f, 0.95f },
+	.close_x = { 0.85f, 0.84f, 0.9f },
+	.white = { 1.0f, 1.0f, 1.0f },
+	.edge = { 1.0f, 1.0f, 1.0f },
+	.panel_rgb = { 0.05f, 0.035f, 0.09f },
+	.bar_rgb = { 0.06f, 0.04f, 0.11f },
+	.field_rgb = { 0.04f, 0.03f, 0.08f },
+	.dim_rgb = { 0.04f, 0.03f, 0.07f },
+	.tile_rgb = { 0.09f, 0.07f, 0.16f },
+	.border_dim = { 0.25f, 0.24f, 0.33f },
+	.shadow = { 0.0f, 0.0f, 0.0f, 0.35f },
+};
+static const struct vile_palette VILE_PALETTE_LIGHT = {
+	.bg = { 0.949f, 0.941f, 0.980f }, /* #F2F0FA (was missing: bg was black) */
+	.text = { 0.102f, 0.086f, 0.149f },
+	.text_hi = { 0.102f, 0.086f, 0.149f },
+	.text2 = { 0.420f, 0.396f, 0.502f },
+	.text3 = { 0.420f, 0.396f, 0.502f },
+	.muted = { 0.45f, 0.42f, 0.52f },
+	.hint = { 0.45f, 0.42f, 0.52f },
+	.status = { 0.42f, 0.40f, 0.50f },
+	.panel_val = { 0.102f, 0.086f, 0.149f },
+	.glyph = { 0.102f, 0.086f, 0.149f },
+	.date_hi = { 0.42f, 0.40f, 0.50f },
+	.close_x = { 0.102f, 0.086f, 0.149f },
+	.white = { 0.102f, 0.086f, 0.149f },
+	.edge = { 0.102f, 0.086f, 0.149f },
+	.panel_rgb = { 0.988f, 0.980f, 1.0f },
+	.bar_rgb = { 0.965f, 0.957f, 0.992f },
+	.field_rgb = { 1.0f, 1.0f, 1.0f },
+	/* dim_rgb is PREMULTIPLIED by the 0.30 dim alpha: wlroots renders
+	 * scene rects as premultiplied on both pixman and GLES2, so a
+	 * (1,1,1,0.30) dim composites as opaque white. (0.30,0.30,0.30)
+	 * is the true 30% white wash. Dark keeps its shipped values. */
+	.dim_rgb = { 0.30f, 0.30f, 0.30f },
+	.tile_rgb = { 0.09f, 0.07f, 0.16f },
+	.border_dim = { 0.72f, 0.71f, 0.78f },
+	.shadow = { 0.0f, 0.0f, 0.0f, 0.18f },
+};
+/* Takes the flag, not the server: the palette accessor is defined
+ * before struct vile_server, and a forward declaration is not
+ * enough to dereference a member. */
+static const struct vile_palette *vile_pal(bool light) {
+	return light ? &VILE_PALETTE_LIGHT : &VILE_PALETTE_DARK;
+}
 #define VILE_OUT_W 1920
 #define VILE_OUT_H 1080
+/* Dock entries (Nov 10, 2026 ~16:31 — frosted dock (v3, Nov 10 ~19:52) + reorder +
+ * unpin + Setup icon). The dock is an ORDERED list of app ids, not
+ * four fixed slots. Defined here because the server struct below
+ * sizes its dock arrays from it. */
+#define VILE_DOCK_MAX 8
+enum vile_dock_app {
+	DOCK_FOOT = 0,
+	DOCK_SETTINGS,
+	DOCK_SCREENFIT,
+	DOCK_FILES,
+	DOCK_SETUP,
+	DOCK_APP_COUNT,
+};
+static const char *vile_dock_app_names[DOCK_APP_COUNT] = {
+	"foot", "settings", "screenfit", "files", "setup",
+};
 /* Piece 2 fallback window size, used only before the first tile
  * computation (e.g. if a client commits before any output exists).
  * Tiling (Piece 4) owns sizes once the window maps. */
@@ -283,6 +425,34 @@ struct vile_server {
 	 * window, if any. */
 	uint64_t next_seq;
 	struct vile_toplevel *fullscreen_toplevel;
+
+	/* Interactive move/resize grab (0.5.4 post-theme fixes): one
+	 * active pointer grab at a time. Started by a client request
+	 * (title-bar drag / edge drag via xdg-shell), by a
+	 * compositor-side title-bar or edge press, or by Super+drag.
+	 * grab_edges is a WLR_EDGE_* bitmask for resize. The grab
+	 * intercepts pointer motion (the window follows live) and ends
+	 * on button release. */
+	int grab_mode; /* 0 = none, 1 = move, 2 = resize */
+	struct vile_toplevel *grab_toplevel;
+	double grab_cursor_x, grab_cursor_y;
+	int grab_start_x, grab_start_y, grab_start_w, grab_start_h;
+	uint32_t grab_edges;
+	/* Pending grab (0.5.4 drag fix): a press on a title bar /
+	 * edge / Super+drag arms a grab but does NOT start it — the
+	 * grab only begins once the pointer has moved past
+	 * VILE_DRAG_THRESHOLD. A plain click (press + release with
+	 * no motion) therefore reaches the client untouched, so a
+	 * CSD minimize/maximize/close button works even on a
+	 * maximized window, where starting the grab on press used
+	 * to unmaximize + re-anchor the window and steal the click.
+	 * The press point is kept so the grab, once it fires,
+	 * anchors on the press — the window follows the pointer
+	 * exactly from where the drag started. */
+	int pending_grab_mode; /* 0 = none, 1 = move, 2 = resize */
+	struct vile_toplevel *pending_grab_toplevel;
+	double pending_grab_x, pending_grab_y;
+	uint32_t pending_grab_edges;
 
 	/* Lock screen (queued after Piece 2). Minimal keyboard slice:
 	 * just enough to type a password — full input (focus, keybinds,
@@ -356,6 +526,16 @@ struct vile_server {
 	char shell_bar_frost_path[1024];
 	int shell_bar_frost_w, shell_bar_frost_h;
 	time_t shell_bar_frost_mtime;
+	/* Dock frost cache (Frosted dock, Nov 10, 2026 ~19:52 —
+	 * macOS-style: blurred wallpaper behind the dock pill,
+	 * rebuilt only when the wallpaper path, its mtime, or the
+	 * dock rect (x/y/w/h) changes. The tint is applied at paint
+	 * time from the theme, so a theme flip needs no rebuild. */
+	cairo_surface_t *shell_dock_frost;
+	char shell_dock_frost_path[1024];
+	time_t shell_dock_frost_mtime;
+	int shell_dock_frost_x, shell_dock_frost_y,
+		shell_dock_frost_w, shell_dock_frost_h;
 	cairo_surface_t *shell_foot_icon;
 	cairo_surface_t *shell_files_icon;
 	cairo_surface_t *shell_vile_icon;
@@ -365,18 +545,45 @@ struct vile_server {
 	int shell_dock_foot_n, shell_dock_set_n, shell_dock_screenfit_n,
 		shell_dock_files_n;
 	struct vile_toplevel *shell_dock_focused;
+	/* Dock (frosted, ordered, Nov 10, 2026 ~16:31): the dock
+	 * is an ordered list of app ids (dock_order[0..dock_n-1]),
+	 * centred, growing symmetrically from the middle as entries
+	 * are added. dock_setup_shown tracks whether the Setup icon
+	 * is currently appended (first-run setup incomplete, not
+	 * unpinned). Per-slot click rects live in shell_dock_rects. */
+	int dock_order[VILE_DOCK_MAX];
+	int dock_n;
+	bool dock_setup_shown;
+	struct wlr_box shell_dock_rects[VILE_DOCK_MAX];
+	/* Unpin context menu (right-click a dock icon): one row,
+	 * "Unpin", in a small card above the dock. */
+	struct wlr_scene_buffer *shell_unpin_node;
+	struct wlr_buffer *shell_unpin_buffer;
+	bool shell_unpin_open;
+	int shell_unpin_slot;
+	struct wlr_box shell_unpin_rect;
+	struct wlr_box shell_unpin_row_rect;
+	/* Dock press / reorder drag: a press arms the slot, a 400ms
+	 * hold starts the reorder, a quick release activates the app.
+	 * dock_press_down tracks the button so a release after the
+	 * timer fired still drops the drag. */
+	struct wl_event_source *dock_hold_timer;
+	int dock_press_slot; /* -1 none */
+	int64_t dock_press_ms;
+	double dock_press_x, dock_press_y;
+	bool dock_press_moved;
+	bool dock_press_down;
+	bool dock_reorder;
+	int dock_drag_slot;
+	double dock_drag_x;
 	/* Click targets on the shell (output coords). */
-	struct wlr_box shell_logo_rect;
 	struct wlr_box shell_status_rect;
 	struct wlr_box shell_dock_rect;
-	struct wlr_box shell_dock_foot_rect;
-	struct wlr_box shell_dock_settings_rect;
-	struct wlr_box shell_dock_screenfit_rect;
-	struct wlr_box shell_dock_files_rect;
 	struct wlr_box shell_menu_rect;
 	struct wlr_box shell_menu_lock_rect;
 	struct wlr_box shell_menu_settings_rect;
 	struct wlr_box shell_menu_power_rect;
+	struct wlr_box shell_menu_logout_rect;
 
 	/* Piece 7 — animations. All of them are wall-clock driven
 	 * (monotonic ms, ease-out cubic) and advanced by vile_anim_tick
@@ -388,14 +595,25 @@ struct vile_server {
 	 * pop re-render that small buffer while active). */
 	int64_t anim_startup_ms; /* 0 = startup anim not started yet */
 	bool anim_startup_done;
-	int dock_hover; /* -1 none, 0 foot, 1 Settings, 2 ScreenFit, 3 Files */
-	float dock_icon_scale[4]; /* current per-icon scale (1.0 normal) */
-	float dock_rendered_scale[4]; /* scale last painted into the dock buffer */
-	float dock_icon_from[4];
-	float dock_icon_to[4];
-	int64_t dock_icon_ms[4]; /* when each icon's scale anim started */
-	int dock_pop_icon; /* -1 none */
+	int dock_hover; /* -1 none, else the dock SLOT hovered (0..dock_n-1) */
+	float dock_icon_scale[VILE_DOCK_MAX]; /* current per-slot scale (1.0 normal) */
+	float dock_rendered_scale[VILE_DOCK_MAX]; /* scale last painted into the dock buffer */
+	float dock_icon_from[VILE_DOCK_MAX];
+	float dock_icon_to[VILE_DOCK_MAX];
+	int64_t dock_icon_ms[VILE_DOCK_MAX]; /* when each slot's scale anim started */
+	int dock_pop_icon; /* -1 none, else the dock SLOT popping */
 	int64_t dock_pop_ms;
+	/* Launch jump (0.5.6 — KDE Plasma style): per-APP launch start
+	 * time, monotonic ms (0 = not launching). Set when a dock click
+	 * spawns an app; cleared when its window maps or after the 5s
+	 * timeout. While set, the tick re-renders the dock every frame
+	 * and the icon bounces. */
+	int64_t dock_launch_ms[DOCK_APP_COUNT];
+	/* Circle-spin loader frames (assets/loaders/circle-spin/),
+	 * drawn as a purple mask on a bouncing icon while its app
+	 * loads. Loaded lazily on the first dock launch. */
+	cairo_surface_t *shell_spin_frames[53];
+	int shell_spin_n;
 	int shell_dock_buf_w, shell_dock_buf_h; /* last dock buffer size */
 	/* System menu rise/fade: current opacity + y offset, animated
 	 * toward the targets; menu_closing defers disabling the node
@@ -427,14 +645,11 @@ struct vile_server {
 	struct wlr_buffer *wallpaper_buffer;
 	struct wlr_texture *wallpaper_texture;
 	int wallpaper_w, wallpaper_h;
-	/* Arch logo overlay (Nov 10, 2026 — Adnan: the logo must stay
-	 * when the wallpaper changes): the transparent Arch logo drawn
-	 * centred over the wallpaper, under windows and under the
-	 * shell, so it reads as part of the desktop. The lock screen
-	 * is untouched — its blurred Arch wallpaper already has the
-	 * logo, and the lock tree covers this node while locked. */
-	struct wlr_scene_buffer *logo_node;
-	struct wlr_buffer *logo_buffer;
+	/* No logo overlay (Nov 10, 2026 ~16:31 — Adnan, twice: the
+	 * Arch logo must not be stamped on ANY wallpaper. The overlay
+	 * draw was deleted entirely; the Arch wallpaper keeps its own
+	 * baked-in logo, nebula/dunes show clean. The arch-logo.png /
+	 * arch-logo-dark.png assets stay on disk, unused.) */
 	/* Live reload (UI polish): the 1-second shell timer watches
 	 * ~/.config/vile/wallpaper; when its mtime changes, the
 	 * compositor swaps the wallpaper without a restart.
@@ -444,6 +659,13 @@ struct vile_server {
 	 * (0 = no hook file). */
 	time_t wallpaper_hook_mtime;
 	char wallpaper_current[1024];
+
+	/* Theme (0.5.4): ~/.config/vile/theme ("dark"/"light", default
+	 * dark). Read at startup and watched by the 1s shell timer,
+	 * same pattern as the wallpaper hook — switching applies live.
+	 * VILE_THEME=light|dark (test override) wins over the file. */
+	bool theme_light;
+	time_t theme_mtime;
 
 	/* Headless-test helpers. */
 	struct wl_event_source *quit_timer;
@@ -612,7 +834,8 @@ static bool vile_load_wallpaper(struct vile_server *server, const char *path) {
 	/* Bottom-most node in the scene, under everything else. The dark
 	 * purple rect goes underneath it so any letterbox area is Vile
 	 * purple-dark, never black. */
-	const float bg[4] = { VILE_BG_R, VILE_BG_G, VILE_BG_B, 1.0f };
+	const struct vile_palette *P = vile_pal(server->theme_light);
+	const float bg[4] = { P->bg[0], P->bg[1], P->bg[2], 1.0f };
 	server->bg_rect = wlr_scene_rect_create(&server->scene->tree,
 		VILE_OUT_W, VILE_OUT_H, bg);
 	server->wallpaper_node = wlr_scene_buffer_create(&server->scene->tree, buf);
@@ -645,8 +868,6 @@ static void vile_fit_wallpaper(struct vile_server *server, int out_w, int out_h)
 		(out_w - dw) / 2, (out_h - dh) / 2);
 	wlr_log(WLR_INFO, "Vile: wallpaper fitted to output %dx%d (drawn %dx%d)",
 		out_w, out_h, dw, dh);
-	/* The logo overlay tracks the same output size. */
-	vile_fit_logo(server, out_w, out_h);
 }
 
 /* Live wallpaper reload (Settings wallpaper switching): decode the
@@ -863,6 +1084,9 @@ struct vile_toplevel {
 	struct wl_listener destroy;
 	struct wl_listener request_maximize;
 	struct wl_listener request_fullscreen;
+	struct wl_listener request_minimize;
+	struct wl_listener request_move;
+	struct wl_listener request_resize;
 	/* Piece 4: tiling — border rect behind the window (a scene-root
 	 * rect, kept below the window), creation sequence (stable tile
 	 * order), fullscreen state, and the last tile rect given. */
@@ -870,6 +1094,23 @@ struct vile_toplevel {
 	uint64_t seq;
 	bool fullscreen;
 	int tile_x, tile_y, tile_w, tile_h;
+	/* Interactive move/resize + minimize/maximize (0.5.4 post-theme
+	 * fixes, Nov 10 2026 — the Dell run: windows were not draggable
+	 * at all and the minimize/maximize buttons did nothing).
+	 * floating = dragged out of the tiling layout (float_* is the
+	 * rect it was dropped at); minimized = hidden by
+	 * set_minimized, restorable from the dock or Super+J/K;
+	 * maximized = fills the work area, max_prev_* is the rect to
+	 * restore (and max_was_floating says whether that rect was a
+	 * float rect or a tile). tile_* is kept in sync with the
+	 * current visible rect, so the open animation and the close
+	 * fade use the right geometry for floating windows too. */
+	bool floating;
+	bool minimized;
+	bool maximized;
+	bool max_was_floating;
+	int float_x, float_y, float_w, float_h;
+	int max_prev_x, max_prev_y, max_prev_w, max_prev_h;
 	/* Piece 7 — window open animation + focus border cross-fade.
 	 * surf_buf is the surface's scene buffer, found by walking the
 	 * scene tree (the subsurface tree is the oldest child, so it is
@@ -934,12 +1175,33 @@ static void vile_schedule_frames(struct vile_server *server) {
  * cover the bar or the dock. */
 #define VILE_BAR_H 40
 #define VILE_DOCK_H 80
+/* Interactive move/resize (0.5.4 post-theme fixes): the top strip
+ * of a window that starts a move, and the edge/corner strip that
+ * starts a resize. */
+#define VILE_TITLE_H 36
+#define VILE_EDGE_PX 8
 
 static int vile_tile_count(struct vile_server *server) {
 	int n = 0;
 	struct vile_toplevel *t;
 	wl_list_for_each(t, &server->toplevels, link) {
 		n++;
+	}
+	return n;
+}
+
+/* Windows that take part in the master-stack layout: visible,
+ * tiled ones only. Floating (dragged), maximized and minimized
+ * windows are positioned/hidden by their own code paths in
+ * vile_tile, never by the layout — so dragging one window out
+ * never reshuffles the ones left behind. */
+static int vile_tileable_count(struct vile_server *server) {
+	int n = 0;
+	struct vile_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (!t->minimized && !t->floating && !t->maximized) {
+			n++;
+		}
 	}
 	return n;
 }
@@ -998,7 +1260,9 @@ static void vile_border_apply(struct vile_toplevel *t) {
 		return;
 	}
 	const float focused[4] = { 0.43f, 0.29f, 1.0f, 1.0f };
-	const float dim[4] = { 0.25f, 0.24f, 0.33f, 1.0f };
+	const struct vile_palette *pal = vile_pal(t->server->theme_light);
+	const float dim[4] = { pal->border_dim[0], pal->border_dim[1],
+		pal->border_dim[2], 1.0f };
 	float f = t->border_focus;
 	float c[4] = {
 		dim[0] + (focused[0] - dim[0]) * f,
@@ -1013,7 +1277,12 @@ static void vile_update_borders(struct vile_server *server) {
 	struct vile_toplevel *t;
 	wl_list_for_each(t, &server->toplevels, link) {
 		if (!t->border) continue;
-		bool show = (server->fullscreen_toplevel == NULL);
+		/* Minimized and maximized windows have no border at all
+		 * (vile_tile hides them) — never re-enable it here, or
+		 * a minimized window would leave a purple rect floating
+		 * on the desktop. */
+		bool show = (server->fullscreen_toplevel == NULL) &&
+			!t->minimized && !t->maximized;
 		wlr_scene_node_set_enabled(&t->border->node, show);
 		/* Piece 7: focus change cross-fades the border instead of
 		 * snapping it. Re-base the fade from the CURRENT focus
@@ -1077,6 +1346,21 @@ static int vile_anim_dur_for(int def_ms) {
 		}
 	}
 	return def_ms;
+}
+
+/* Launch-jump bounce period (0.5.6): one up-down bounce per
+ * VILE_LAUNCH_JUMP_MS ms (default 500). Overridable for tests —
+ * the harness slows it to 2000ms because grim takes ~0.75s per
+ * shot, so a 500ms bounce is easy to miss between frames. */
+static int vile_launch_jump_ms(void) {
+	const char *e = getenv("VILE_LAUNCH_JUMP_MS");
+	if (e) {
+		int v = atoi(e);
+		if (v >= 100 && v <= 10000) {
+			return v;
+		}
+	}
+	return VILE_LAUNCH_JUMP_MS;
 }
 
 static bool vile_anim_enabled(void) {
@@ -1202,7 +1486,7 @@ static void vile_anim_dock_hover(struct vile_server *server, int hover) {
 	}
 	server->dock_hover = hover;
 	int64_t now = vile_anim_now_ms();
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < server->dock_n; i++) {
 		float target = (i == hover) ? 1.14f : 1.0f;
 		if (fabsf(server->dock_icon_scale[i] - target) < 0.001f) {
 			server->dock_icon_from[i] = target;
@@ -1299,7 +1583,8 @@ static void vile_anim_lock_in(struct vile_server *server) {
 		wlr_scene_node_set_position(&server->lock_ui_node->node, 0, 14);
 	}
 	if (server->lock_dim) {
-		const float dim0[4] = { 0.04f, 0.03f, 0.07f, 0.0f };
+		const struct vile_palette *pal = vile_pal(server->theme_light);
+		const float dim0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		wlr_scene_rect_set_color(server->lock_dim, dim0);
 	}
 	vile_schedule_frames(server);
@@ -1333,9 +1618,6 @@ static void vile_anim_startup(struct vile_server *server) {
 	server->anim_startup_ms = vile_anim_now_ms();
 	if (server->wallpaper_node) {
 		wlr_scene_buffer_set_opacity(server->wallpaper_node, 0.0f);
-	}
-	if (server->logo_node) {
-		wlr_scene_buffer_set_opacity(server->logo_node, 0.0f);
 	}
 	if (server->shell_bar_node) {
 		wlr_scene_buffer_set_opacity(server->shell_bar_node, 0.0f);
@@ -1372,10 +1654,6 @@ static bool vile_anim_tick(struct vile_server *server) {
 				wlr_scene_buffer_set_opacity(
 					server->wallpaper_node, 1.0f);
 			}
-			if (server->logo_node) {
-				wlr_scene_buffer_set_opacity(
-					server->logo_node, 0.9f);
-			}
 			if (server->shell_bar_node) {
 				wlr_scene_buffer_set_opacity(
 					server->shell_bar_node, 1.0f);
@@ -1402,10 +1680,6 @@ static bool vile_anim_tick(struct vile_server *server) {
 			if (server->wallpaper_node) {
 				wlr_scene_buffer_set_opacity(
 					server->wallpaper_node, e);
-			}
-			if (server->logo_node) {
-				wlr_scene_buffer_set_opacity(
-					server->logo_node, 0.9f * e);
 			}
 			if (server->shell_bar_node) {
 				wlr_scene_buffer_set_opacity(
@@ -1513,7 +1787,7 @@ static bool vile_anim_tick(struct vile_server *server) {
 	/* --- Dock hover grow + click pop: re-render the dock buffer
 	 * while any icon scale is moving. --- */
 	bool dock_moving = false;
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < server->dock_n; i++) {
 		if (server->dock_icon_ms[i] != 0) {
 			int ddur = vile_anim_dur_for(150);
 			float p = ddur > 0 ?
@@ -1551,13 +1825,13 @@ static bool vile_anim_tick(struct vile_server *server) {
 		 * since the last render — the tick runs every frame while
 		 * any animation is alive, and the dock buffer is cairo
 		 * work we do not want to redo for nothing. */
-		float eff[4];
-		for (int i = 0; i < 4; i++) {
+		float eff[VILE_DOCK_MAX];
+		for (int i = 0; i < server->dock_n; i++) {
 			eff[i] = server->dock_icon_scale[i] *
 				vile_dock_pop_scale(server, i);
 		}
 		bool changed = false;
-		for (int i = 0; i < 4; i++) {
+		for (int i = 0; i < server->dock_n; i++) {
 			if (fabsf(eff[i] - server->dock_rendered_scale[i])
 					> 0.002f) {
 				changed = true;
@@ -1565,11 +1839,56 @@ static bool vile_anim_tick(struct vile_server *server) {
 			}
 		}
 		if (changed) {
-			for (int i = 0; i < 4; i++) {
+			for (int i = 0; i < server->dock_n; i++) {
 				server->dock_rendered_scale[i] = eff[i];
 			}
 			vile_shell_render_dock(server);
 		}
+	}
+
+	/* --- Launch jump (0.5.6 — KDE Plasma style): bounce the
+	 * launching icons until each app's window maps, or the 5s
+	 * timeout hits. The dock is re-rendered every frame while
+	 * any icon bounces (the offset moves every frame, like the
+	 * hover/pop path above). Timeout is overridable for tests:
+	 * VILE_LAUNCH_TIMEOUT_MS (default 5000). --- */
+	int64_t launch_timeout = VILE_LAUNCH_TIMEOUT_MS;
+	{
+		const char *te = getenv("VILE_LAUNCH_TIMEOUT_MS");
+		if (te && *te) {
+			long tv = strtol(te, NULL, 10);
+			if (tv > 0) {
+				launch_timeout = tv;
+			}
+		}
+	}
+	bool launch_active = false, launch_changed = false;
+	for (int a = 0; a < DOCK_APP_COUNT; a++) {
+		if (server->dock_launch_ms[a] == 0) {
+			continue;
+		}
+		int64_t elapsed = now - server->dock_launch_ms[a];
+		if (vile_dock_launch_appeared(server, a)) {
+			wlr_log(WLR_INFO,
+				"Vile: dock: launch done '%s' (%lldms)",
+				vile_dock_app_names[a], (long long)elapsed);
+			server->dock_launch_ms[a] = 0;
+			launch_changed = true;
+		} else if (elapsed >= launch_timeout) {
+			wlr_log(WLR_INFO,
+				"Vile: dock: launch timeout '%s' (%lldms)",
+				vile_dock_app_names[a], (long long)elapsed);
+			server->dock_launch_ms[a] = 0;
+			launch_changed = true;
+		} else {
+			launch_active = true;
+		}
+	}
+	if (launch_active) {
+		active = true;
+	}
+	if (server->shell_created && (launch_active || launch_changed)) {
+		vile_shell_render_dock(server);
 	}
 
 	/* --- System menu rise/fade. --- */
@@ -1623,7 +1942,10 @@ static bool vile_anim_tick(struct vile_server *server) {
 					&server->lock_ui_node->node, 0, 0);
 			}
 			if (server->lock_dim) {
-				const float dim[4] = { 0.04f, 0.03f, 0.07f,
+				const struct vile_palette *pal = vile_pal(server->theme_light);
+				const float dim[4] = { pal->dim_rgb[0] * server->lock_op,
+					pal->dim_rgb[1] * server->lock_op,
+					pal->dim_rgb[2] * server->lock_op,
 					0.30f * server->lock_op };
 				wlr_scene_rect_set_color(server->lock_dim, dim);
 			}
@@ -1654,7 +1976,10 @@ static bool vile_anim_tick(struct vile_server *server) {
 					&server->lock_ui_node->node, 0, dy);
 			}
 			if (server->lock_dim) {
-				const float dim[4] = { 0.04f, 0.03f, 0.07f,
+				const struct vile_palette *pal = vile_pal(server->theme_light);
+				const float dim[4] = { pal->dim_rgb[0] * server->lock_op,
+					pal->dim_rgb[1] * server->lock_op,
+					pal->dim_rgb[2] * server->lock_op,
 					0.30f * server->lock_op };
 				wlr_scene_rect_set_color(server->lock_dim, dim);
 			}
@@ -1756,10 +2081,66 @@ static void vile_tile(struct vile_server *server) {
 		arr[i++] = t;
 	}
 	qsort(arr, (size_t)n, sizeof(*arr), vile_tile_cmp);
+	/* How many windows the layout itself places (floating /
+	 * maximized / minimized windows are handled below, not by
+	 * the master-stack). */
+	int ntile = vile_tileable_count(server);
+	int ti = 0; /* index among tileable windows */
 	for (i = 0; i < n; i++) {
 		t = arr[i];
+		if (t->minimized) {
+			/* Hidden until restored (dock click or
+			 * Super+J/K focus) — the node AND the border
+			 * stay off, and it takes no tile slot. */
+			wlr_scene_node_set_enabled(&t->scene_tree->node, false);
+			if (t->border) {
+				wlr_scene_node_set_enabled(&t->border->node, false);
+			}
+			continue;
+		}
+		if (t->maximized) {
+			/* Fills the work area — the same rect a single
+			 * tiled window gets (12px gaps, dock + bar
+			 * clear), so the dock stays usable above it. */
+			int x, y, w, h;
+			vile_tile_rect(0, 1, out_w, out_h, &x, &y, &w, &h);
+			t->tile_x = x; t->tile_y = y; t->tile_w = w; t->tile_h = h;
+			wlr_scene_node_set_enabled(&t->scene_tree->node, true);
+			wlr_scene_node_set_position(&t->scene_tree->node, x, y);
+			if (t->border) {
+				wlr_scene_node_set_enabled(&t->border->node, false);
+			}
+			wlr_xdg_toplevel_set_size(t->xdg_toplevel, w, h);
+			wlr_log(WLR_INFO, "Vile: tiling: maximized '%s' at %d,%d %dx%d",
+				t->xdg_toplevel->title ? t->xdg_toplevel->title : "?",
+				x, y, w, h);
+			continue;
+		}
+		if (t->floating) {
+			/* Dragged out of the layout: it stays exactly
+			 * where it was dropped, and the remaining
+			 * tiled windows close ranks around it. */
+			int x = t->float_x, y = t->float_y;
+			int w = t->float_w, h = t->float_h;
+			t->tile_x = x; t->tile_y = y; t->tile_w = w; t->tile_h = h;
+			wlr_scene_node_set_enabled(&t->scene_tree->node, true);
+			wlr_scene_node_set_position(&t->scene_tree->node, x, y);
+			if (t->border) {
+				wlr_scene_node_set_enabled(&t->border->node, true);
+				wlr_scene_rect_set_size(t->border,
+					w + VILE_BORDER * 2, h + VILE_BORDER * 2);
+				wlr_scene_node_set_position(&t->border->node,
+					x - VILE_BORDER, y - VILE_BORDER);
+			}
+			wlr_xdg_toplevel_set_size(t->xdg_toplevel, w, h);
+			wlr_log(WLR_INFO, "Vile: tiling: floating '%s' at %d,%d %dx%d",
+				t->xdg_toplevel->title ? t->xdg_toplevel->title : "?",
+				x, y, w, h);
+			continue;
+		}
 		int x, y, w, h;
-		vile_tile_rect(i, n, out_w, out_h, &x, &y, &w, &h);
+		vile_tile_rect(ti, ntile, out_w, out_h, &x, &y, &w, &h);
+		ti++;
 		t->tile_x = x; t->tile_y = y; t->tile_w = w; t->tile_h = h;
 		/* Re-enable the window node: the fullscreen branch (and
 		 * the lock) disable it, and only this branch puts it
@@ -1781,7 +2162,7 @@ static void vile_tile(struct vile_server *server) {
 		}
 		wlr_xdg_toplevel_set_size(t->xdg_toplevel, w, h);
 		wlr_log(WLR_INFO, "Vile: tiling: window %d/%d '%s' at %d,%d %dx%d",
-			i + 1, n,
+			ti, ntile,
 			t->xdg_toplevel->title ? t->xdg_toplevel->title : "?",
 			x, y, w, h);
 	}
@@ -1835,6 +2216,14 @@ static void vile_focus_direction(struct vile_server *server, int delta) {
 static void vile_toggle_fullscreen(struct vile_server *server) {
 	struct vile_toplevel *t = server->focused_toplevel;
 	if (!t || server->locked) {
+		return;
+	}
+	/* A maximized window unmaximizes on Super+F (the maximize
+	 * button's second click does the same) instead of going
+	 * fullscreen — Super+F is the restore keybind. */
+	if (t->maximized) {
+		wlr_log(WLR_INFO, "Vile: keybind Super+F -> unmaximize");
+		vile_unmaximize(server, t);
 		return;
 	}
 	if (server->fullscreen_toplevel == t) {
@@ -2041,6 +2430,11 @@ static struct vile_toplevel *vile_toplevel_at(struct vile_server *server,
  * first in the list, so closing a window can refocus the previous one. */
 static void vile_focus_toplevel(struct vile_server *server,
 		struct vile_toplevel *toplevel) {
+	/* A minimized window focused from anywhere (dock click,
+	 * Super+J/K) comes back first — focus is the restore path. */
+	if (toplevel && toplevel->minimized) {
+		vile_unminimize(server, toplevel);
+	}
 	if (server->focused_toplevel == toplevel) {
 		return;
 	}
@@ -2088,6 +2482,32 @@ static void vile_process_cursor_motion(struct vile_server *server,
 	if (server->locked) {
 		return;
 	}
+	/* Dock reorder drag (Nov 10, 2026 ~16:31): while a reorder is
+	 * live the pointer owns the dock — the dragged icon follows
+	 * it and the insertion indicator moves. A press that has not
+	 * become a reorder yet just tracks whether it moved >12px
+	 * (a drag-away cancels the click). */
+	if (server->dock_reorder) {
+		server->dock_drag_x = server->cursor->x;
+		vile_shell_render_dock(server);
+		vile_schedule_frames(server);
+		return;
+	}
+	if (server->dock_press_slot >= 0) {
+		double dx = server->cursor->x - server->dock_press_x;
+		double dy = server->cursor->y - server->dock_press_y;
+		if (dx * dx + dy * dy > 144.0) { /* >12px */
+			server->dock_press_moved = true;
+		}
+	}
+	/* A pending grab fires once the pointer moves past the drag
+	 * threshold; an active grab owns the pointer outright. Below
+	 * the threshold the motion is just a hover / click, and the
+	 * client keeps getting its pointer events. */
+	if (vile_grab_maybe_fire(server)) {
+		vile_grab_update(server);
+		return;
+	}
 	double sx, sy;
 	struct wlr_surface *surface = NULL;
 	struct vile_toplevel *toplevel = vile_toplevel_at(server,
@@ -2098,18 +2518,8 @@ static void vile_process_cursor_motion(struct vile_server *server,
 	if (server->shell_created) {
 		int hover = -1;
 		int cx = (int)server->cursor->x, cy = (int)server->cursor->y;
-		if (vile_box_contains(&server->shell_dock_foot_rect, cx, cy)) {
-			hover = 0;
-		} else if (vile_box_contains(&server->shell_dock_settings_rect,
-				cx, cy)) {
-			hover = 1;
-		} else if (vile_box_contains(&server->shell_dock_screenfit_rect,
-				cx, cy)) {
-			hover = 2;
-		} else if (vile_box_contains(&server->shell_dock_files_rect,
-				cx, cy)) {
-			hover = 3;
-		}
+		/* The hovered SLOT (0..dock_n-1), not a fixed app. */
+		hover = vile_dock_slot_at(server, cx, cy);
 		vile_anim_dock_hover(server, hover);
 	}
 	if (!toplevel) {
@@ -2164,12 +2574,28 @@ static void vile_cursor_button(struct wl_listener *listener, void *data) {
 	vile_process_cursor_motion(server, event->time_msec);
 	wlr_seat_pointer_notify_button(server->seat,
 		event->time_msec, event->button, event->state);
+	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		/* A drag ends when the button comes up — the window
+		 * stays exactly where the last motion put it. */
+		if (server->grab_mode != 0) {
+			vile_grab_end(server);
+		} else if (server->pending_grab_mode != 0) {
+			/* Plain click: the press never became a drag.
+			 * The client already has press + release, so a
+			 * CSD button works — just drop the pending grab. */
+			vile_grab_disarm(server);
+		}
+		/* Dock press / reorder drop (no-op when nothing armed). */
+		vile_dock_release(server);
+		return;
+	}
 	if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
 		/* Piece 5: the bar / dock / system menu eat the click
 		 * first — they are shell territory, not windows. A click
-		 * there must not clear window focus either. */
+		 * there must not clear window focus either. The button
+		 * matters now (left = press-arm / menu, right = Unpin). */
 		if (vile_shell_click(server, server->cursor->x,
-				server->cursor->y)) {
+				server->cursor->y, event->button)) {
 			return;
 		}
 		/* Click focuses (and raises) the window under the cursor;
@@ -2178,6 +2604,73 @@ static void vile_cursor_button(struct wl_listener *listener, void *data) {
 		struct wlr_surface *surface = NULL;
 		struct vile_toplevel *toplevel = vile_toplevel_at(server,
 			server->cursor->x, server->cursor->y, &surface, &sx, &sy);
+		if (toplevel && !toplevel->minimized) {
+			int cx = (int)server->cursor->x;
+			int cy = (int)server->cursor->y;
+			struct wlr_keyboard *kb =
+				wlr_seat_get_keyboard(server->seat);
+			uint32_t mods = kb ?
+				wlr_keyboard_get_modifiers(kb) : 0;
+			/* Super (Windows key) + drag anywhere on the
+			 * window: left button moves, right button
+			 * resizes from the nearest corner. The grab is
+			 * armed, not started — a plain Super+click with
+			 * no motion still reaches the client. */
+			if ((mods & WLR_MODIFIER_LOGO) &&
+					event->button == BTN_LEFT) {
+				vile_grab_arm(server, toplevel, 1, 0);
+				return;
+			}
+			if ((mods & WLR_MODIFIER_LOGO) &&
+					event->button == BTN_RIGHT) {
+				uint32_t edges = 0;
+				int mx = toplevel->tile_x + toplevel->tile_w / 2;
+				int my = toplevel->tile_y + toplevel->tile_h / 2;
+				edges |= (cy < my) ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM;
+				edges |= (cx < mx) ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT;
+				vile_grab_arm(server, toplevel, 2, edges);
+				return;
+			}
+			if (event->button == BTN_LEFT) {
+				/* Title-bar drag: the top strip of the
+				 * window (foot's CSD title bar / GTK
+				 * header bar) arms a move. A plain click
+				 * here (no motion) moves nothing — the
+				 * button still reaches the client, so
+				 * minimize / maximize / close keep
+				 * working, including on a maximized window
+				 * (the unmaximize + re-anchor now happens
+				 * only once the drag actually starts). */
+				if (cy - toplevel->tile_y < VILE_TITLE_H) {
+					vile_grab_arm(server, toplevel, 1, 0);
+					return;
+				}
+				/* Edge / corner drag on a floating window
+				 * resizes it. */
+				if (toplevel->floating) {
+					uint32_t edges = 0;
+					int x0 = toplevel->tile_x;
+					int y0 = toplevel->tile_y;
+					int x1 = x0 + toplevel->tile_w;
+					int y1 = y0 + toplevel->tile_h;
+					if (cy - y0 < VILE_EDGE_PX) {
+						edges |= WLR_EDGE_TOP;
+					} else if (y1 - cy < VILE_EDGE_PX) {
+						edges |= WLR_EDGE_BOTTOM;
+					}
+					if (cx - x0 < VILE_EDGE_PX) {
+						edges |= WLR_EDGE_LEFT;
+					} else if (x1 - cx < VILE_EDGE_PX) {
+						edges |= WLR_EDGE_RIGHT;
+					}
+					if (edges != 0) {
+						vile_grab_arm(server,
+							toplevel, 2, edges);
+						return;
+					}
+				}
+			}
+		}
 		vile_focus_toplevel(server, toplevel);
 	}
 }
@@ -2327,6 +2820,14 @@ static void vile_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct vile_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
 	struct vile_server *server = toplevel->server;
 	bool was_focused = (server->focused_toplevel == toplevel);
+	/* A window destroyed mid-drag must not leave a stale grab
+	 * pointing at freed memory. */
+	if (server->grab_toplevel == toplevel) {
+		vile_grab_end(server);
+	}
+	if (server->pending_grab_toplevel == toplevel) {
+		vile_grab_disarm(server);
+	}
 	/* Piece 7: snapshot the last frame and fade it out over the
 	 * re-tiled desktop. Runs BEFORE the list removal below, while
 	 * the tile rect and the surface buffer are still valid. */
@@ -2379,7 +2880,7 @@ static void vile_toplevel_commit(struct wl_listener *listener, void *data) {
 			out_w = output->wlr_output->width;
 			out_h = output->wlr_output->height;
 		}
-		int n = vile_tile_count(server) + 1;
+		int n = vile_tileable_count(server) + 1;
 		int x, y, w, h;
 		vile_tile_rect(n - 1, n, out_w, out_h, &x, &y, &w, &h);
 		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
@@ -2398,6 +2899,9 @@ static void vile_toplevel_destroy(struct wl_listener *listener, void *data) {
 	if (toplevel->server->fullscreen_toplevel == toplevel) {
 		toplevel->server->fullscreen_toplevel = NULL;
 	}
+	if (toplevel->server->pending_grab_toplevel == toplevel) {
+		vile_grab_disarm(toplevel->server);
+	}
 	/* Piece 4: the border is our own scene node (not part of the
 	 * xdg surface tree), so destroy it explicitly or it lingers. */
 	if (toplevel->border) {
@@ -2410,18 +2914,463 @@ static void vile_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->destroy.link);
 	wl_list_remove(&toplevel->request_maximize.link);
 	wl_list_remove(&toplevel->request_fullscreen.link);
+	wl_list_remove(&toplevel->request_minimize.link);
+	wl_list_remove(&toplevel->request_move.link);
+	wl_list_remove(&toplevel->request_resize.link);
 	wlr_log(WLR_INFO, "Vile: window destroyed");
 	free(toplevel);
 }
 
+/* ------------------------------------------------------------------ */
+/* Interactive move/resize + minimize/maximize (0.5.4 post-theme      */
+/* fixes). A drag makes a tiled window floating at its current rect,  */
+/* so the rest re-tile around it; the move itself is live — the node  */
+/* position follows the pointer on every motion event, no snapping    */
+/* back. The grab ends on button release.                             */
+/* ------------------------------------------------------------------ */
+
+#define VILE_FLOAT_MIN_W 200
+#define VILE_FLOAT_MIN_H 120
+/* A press only becomes a drag after the pointer moves this far
+ * (pixels, either axis) — below it, it is a click. */
+#define VILE_DRAG_THRESHOLD 4
+
+/* Arm a pending grab on press — see the server struct comment. The
+ * window is focused at once (click-focus); nothing moves yet. */
+static void vile_grab_arm(struct vile_server *server,
+		struct vile_toplevel *t, int mode, uint32_t edges) {
+	if (!t || server->locked || server->grab_mode != 0 ||
+			server->pending_grab_mode != 0) {
+		return;
+	}
+	if (t->fullscreen || t->minimized) {
+		return;
+	}
+	server->pending_grab_mode = mode;
+	server->pending_grab_toplevel = t;
+	server->pending_grab_x = server->cursor->x;
+	server->pending_grab_y = server->cursor->y;
+	server->pending_grab_edges = edges;
+	vile_focus_toplevel(server, t);
+}
+
+/* Drop a pending grab without starting it (plain click release,
+ * window gone, lock). */
+static void vile_grab_disarm(struct vile_server *server) {
+	server->pending_grab_mode = 0;
+	server->pending_grab_toplevel = NULL;
+	server->pending_grab_edges = 0;
+}
+
+/* Motion with a pending grab armed: fire it once the pointer has
+ * moved past the drag threshold. Returns true if a grab is now
+ * active (already running, or just fired). */
+static bool vile_grab_maybe_fire(struct vile_server *server) {
+	if (server->pending_grab_mode == 0) {
+		return server->grab_mode != 0;
+	}
+	struct vile_toplevel *t = server->pending_grab_toplevel;
+	double dx = server->cursor->x - server->pending_grab_x;
+	double dy = server->cursor->y - server->pending_grab_y;
+	double adx = dx < 0 ? -dx : dx;
+	double ady = dy < 0 ? -dy : dy;
+	if (adx <= VILE_DRAG_THRESHOLD && ady <= VILE_DRAG_THRESHOLD) {
+		return false;
+	}
+	int mode = server->pending_grab_mode;
+	uint32_t edges = server->pending_grab_edges;
+	double px = server->pending_grab_x, py = server->pending_grab_y;
+	vile_grab_disarm(server);
+	if (!t) {
+		return false;
+	}
+	if (mode == 1) {
+		vile_grab_begin_move(server, t);
+	} else {
+		vile_grab_begin_resize(server, t, edges);
+	}
+	if (server->grab_mode != 0) {
+		/* Anchor on the press point, not the fire point, so
+		 * the window follows the pointer exactly from where
+		 * the drag started (no shortfall on the first step). */
+		server->grab_cursor_x = px;
+		server->grab_cursor_y = py;
+	}
+	return server->grab_mode != 0;
+}
+
+static void vile_grab_end(struct vile_server *server) {
+	struct vile_toplevel *t = server->grab_toplevel;
+	if (t) {
+		/* The authoritative final rect: vile_tile does not run
+		 * during a drag, so the tiling log lines go stale
+		 * mid-grab — tests read this line, not those. */
+		wlr_log(WLR_INFO, "Vile: grab %s end '%s' at %d,%d %dx%d",
+			server->grab_mode == 2 ? "resize" : "move",
+			t->xdg_toplevel->title ?
+			t->xdg_toplevel->title : "?",
+			t->float_x, t->float_y, t->float_w, t->float_h);
+	}
+	if (t && server->grab_mode == 2) {
+		wlr_xdg_toplevel_set_resizing(t->xdg_toplevel, false);
+	}
+	server->grab_mode = 0;
+	server->grab_toplevel = NULL;
+	server->grab_edges = 0;
+}
+
+/* Put a window's visible rect (and its border) at x,y,w,h right
+ * now — the live part of a drag. tile_* stays in sync so the open
+ * animation and the close fade use the same rect. */
+static void vile_toplevel_place(struct vile_toplevel *t,
+		int x, int y, int w, int h) {
+	t->tile_x = x; t->tile_y = y; t->tile_w = w; t->tile_h = h;
+	wlr_scene_node_set_position(&t->scene_tree->node, x, y);
+	if (t->border) {
+		wlr_scene_rect_set_size(t->border,
+			w + VILE_BORDER * 2, h + VILE_BORDER * 2);
+		wlr_scene_node_set_position(&t->border->node,
+			x - VILE_BORDER, y - VILE_BORDER);
+	}
+	wlr_xdg_toplevel_set_size(t->xdg_toplevel, w, h);
+}
+
+static void vile_grab_begin_move(struct vile_server *server,
+		struct vile_toplevel *t) {
+	if (!t || server->locked || server->grab_mode != 0) {
+		return;
+	}
+	if (t->fullscreen) {
+		return;
+	}
+	if (t->minimized) {
+		return;
+	}
+	/* Dragging a maximized window unmaximizes it first (like
+	 * GNOME): it comes back at its old size, centred on the
+	 * cursor's x with the title bar under the pointer, and the
+	 * drag continues from there. */
+	if (t->maximized) {
+		vile_unmaximize(server, t);
+		double cx = server->cursor->x, cy = server->cursor->y;
+		t->float_x = (int)(cx - t->float_w / 2);
+		t->float_y = (int)(cy - VILE_TITLE_H / 2);
+		t->floating = true;
+		vile_tile(server);
+	}
+	if (!t->floating) {
+		/* Leave the layout: keep the current tile rect as the
+		 * float rect, then re-tile the windows left behind. */
+		t->float_x = t->tile_x; t->float_y = t->tile_y;
+		t->float_w = t->tile_w; t->float_h = t->tile_h;
+		t->floating = true;
+		vile_tile(server);
+	}
+	/* A drag during the open animation would fight the tick
+	 * (it repositions from tile_* every frame) — finish the
+	 * animation now and hand the window to the pointer. */
+	if (t->anim_active) {
+		t->anim_active = false;
+		if (t->surf_buf) {
+			wlr_scene_buffer_set_opacity(t->surf_buf, 1.0f);
+			wlr_scene_buffer_set_dest_size(t->surf_buf,
+				t->tile_w, t->tile_h);
+		}
+		wlr_scene_node_set_position(&t->scene_tree->node,
+			t->tile_x, t->tile_y);
+	}
+	server->grab_mode = 1;
+	server->grab_toplevel = t;
+	server->grab_cursor_x = server->cursor->x;
+	server->grab_cursor_y = server->cursor->y;
+	server->grab_start_x = t->float_x;
+	server->grab_start_y = t->float_y;
+	server->grab_start_w = t->float_w;
+	server->grab_start_h = t->float_h;
+	vile_focus_toplevel(server, t);
+	wlr_log(WLR_INFO, "Vile: grab move '%s' from %d,%d %dx%d",
+		t->xdg_toplevel->title ? t->xdg_toplevel->title : "?",
+		t->float_x, t->float_y, t->float_w, t->float_h);
+}
+
+static void vile_grab_begin_resize(struct vile_server *server,
+		struct vile_toplevel *t, uint32_t edges) {
+	if (!t || server->locked || server->grab_mode != 0 || edges == 0) {
+		return;
+	}
+	if (t->fullscreen || t->maximized || t->minimized) {
+		return;
+	}
+	if (!t->floating) {
+		t->float_x = t->tile_x; t->float_y = t->tile_y;
+		t->float_w = t->tile_w; t->float_h = t->tile_h;
+		t->floating = true;
+		vile_tile(server);
+	}
+	if (t->anim_active) {
+		t->anim_active = false;
+		if (t->surf_buf) {
+			wlr_scene_buffer_set_opacity(t->surf_buf, 1.0f);
+			wlr_scene_buffer_set_dest_size(t->surf_buf,
+				t->tile_w, t->tile_h);
+		}
+		wlr_scene_node_set_position(&t->scene_tree->node,
+			t->tile_x, t->tile_y);
+	}
+	server->grab_mode = 2;
+	server->grab_toplevel = t;
+	server->grab_cursor_x = server->cursor->x;
+	server->grab_cursor_y = server->cursor->y;
+	server->grab_start_x = t->float_x;
+	server->grab_start_y = t->float_y;
+	server->grab_start_w = t->float_w;
+	server->grab_start_h = t->float_h;
+	server->grab_edges = edges;
+	wlr_xdg_toplevel_set_resizing(t->xdg_toplevel, true);
+	vile_focus_toplevel(server, t);
+	wlr_log(WLR_INFO, "Vile: grab resize '%s' edges %u from %d,%d %dx%d",
+		t->xdg_toplevel->title ? t->xdg_toplevel->title : "?",
+		edges, t->float_x, t->float_y, t->float_w, t->float_h);
+}
+
+/* Pointer moved during a grab: move/resize the window live. Called
+ * from the motion path before any normal pointer-focus work. */
+static void vile_grab_update(struct vile_server *server) {
+	struct vile_toplevel *t = server->grab_toplevel;
+	if (!t || server->grab_mode == 0) {
+		return;
+	}
+	int out_w = VILE_OUT_W, out_h = VILE_OUT_H;
+	if (!wl_list_empty(&server->outputs)) {
+		struct vile_output *output = wl_container_of(
+			server->outputs.next, output, link);
+		out_w = output->wlr_output->width;
+		out_h = output->wlr_output->height;
+	}
+	int dx = (int)(server->cursor->x - server->grab_cursor_x);
+	int dy = (int)(server->cursor->y - server->grab_cursor_y);
+	if (server->grab_mode == 1) {
+		/* Move: keep the title bar reachable — at least 80px of
+		 * the window stays on-screen left/right, and the top
+		 * never goes above the screen (or it could never be
+		 * grabbed again). */
+		int x = server->grab_start_x + dx;
+		int y = server->grab_start_y + dy;
+		int w = server->grab_start_w, h = server->grab_start_h;
+		if (x < -(w - 80)) x = -(w - 80);
+		if (x > out_w - 80) x = out_w - 80;
+		if (y < 0) y = 0;
+		if (y > out_h - VILE_TITLE_H) y = out_h - VILE_TITLE_H;
+		t->float_x = x; t->float_y = y;
+		t->float_w = w; t->float_h = h;
+		vile_toplevel_place(t, x, y, w, h);
+	} else {
+		/* Resize: edges move independently, minimum 200x120,
+		 * clamped inside the output. */
+		int x = server->grab_start_x, y = server->grab_start_y;
+		int w = server->grab_start_w, h = server->grab_start_h;
+		uint32_t e = server->grab_edges;
+		if (e & WLR_EDGE_LEFT) {
+			x = server->grab_start_x + dx;
+			w = server->grab_start_w - dx;
+			if (w < VILE_FLOAT_MIN_W) {
+				x = server->grab_start_x + server->grab_start_w -
+					VILE_FLOAT_MIN_W;
+				w = VILE_FLOAT_MIN_W;
+			}
+			if (x < 0) {
+				w += x;
+				x = 0;
+			}
+		}
+		if (e & WLR_EDGE_RIGHT) {
+			w = server->grab_start_w + dx;
+			if (w < VILE_FLOAT_MIN_W) w = VILE_FLOAT_MIN_W;
+			if (x + w > out_w) w = out_w - x;
+		}
+		if (e & WLR_EDGE_TOP) {
+			y = server->grab_start_y + dy;
+			h = server->grab_start_h - dy;
+			if (h < VILE_FLOAT_MIN_H) {
+				y = server->grab_start_y + server->grab_start_h -
+					VILE_FLOAT_MIN_H;
+				h = VILE_FLOAT_MIN_H;
+			}
+			if (y < 0) {
+				h += y;
+				y = 0;
+			}
+		}
+		if (e & WLR_EDGE_BOTTOM) {
+			h = server->grab_start_h + dy;
+			if (h < VILE_FLOAT_MIN_H) h = VILE_FLOAT_MIN_H;
+			if (y + h > out_h) h = out_h - y;
+		}
+		t->float_x = x; t->float_y = y;
+		t->float_w = w; t->float_h = h;
+		vile_toplevel_place(t, x, y, w, h);
+	}
+	vile_schedule_frames(server);
+}
+
+static void vile_minimize(struct vile_server *server,
+		struct vile_toplevel *t) {
+	if (!t || t->minimized) {
+		return;
+	}
+	if (server->grab_toplevel == t) {
+		vile_grab_end(server);
+	}
+	/* Minimizing leaves fullscreen first (the button is not
+	 * visible in fullscreen, but the protocol path can still
+	 * ask). */
+	if (t->fullscreen) {
+		t->fullscreen = false;
+		if (server->fullscreen_toplevel == t) {
+			server->fullscreen_toplevel = NULL;
+		}
+	}
+	t->minimized = true;
+	wlr_xdg_toplevel_set_activated(t->xdg_toplevel, false);
+	if (server->focused_toplevel == t) {
+		server->focused_toplevel = NULL;
+		/* Focus the most recently focused other visible window,
+		 * or clear focus if none is left. */
+		struct vile_toplevel *next = NULL, *o;
+		wl_list_for_each(o, &server->toplevels, link) {
+			if (o != t && !o->minimized) {
+				next = o;
+				break;
+			}
+		}
+		if (next) {
+			vile_focus_toplevel(server, next);
+		} else {
+			wlr_seat_keyboard_notify_clear_focus(server->seat);
+		}
+	}
+	vile_tile(server);
+	vile_shell_update(server);
+	wlr_log(WLR_INFO, "Vile: minimized '%s'",
+		t->xdg_toplevel->title ? t->xdg_toplevel->title : "?");
+}
+
+static void vile_unminimize(struct vile_server *server,
+		struct vile_toplevel *t) {
+	if (!t || !t->minimized) {
+		return;
+	}
+	t->minimized = false;
+	vile_tile(server);
+	vile_shell_update(server);
+	wlr_log(WLR_INFO, "Vile: restored '%s'",
+		t->xdg_toplevel->title ? t->xdg_toplevel->title : "?");
+}
+
+static void vile_maximize(struct vile_server *server,
+		struct vile_toplevel *t) {
+	if (!t || t->maximized) {
+		return;
+	}
+	if (server->grab_toplevel == t) {
+		vile_grab_end(server);
+	}
+	if (t->fullscreen) {
+		t->fullscreen = false;
+		if (server->fullscreen_toplevel == t) {
+			server->fullscreen_toplevel = NULL;
+		}
+	}
+	/* Remember where it was, so unmaximize puts it back. */
+	t->max_was_floating = t->floating;
+	if (t->floating) {
+		t->max_prev_x = t->float_x; t->max_prev_y = t->float_y;
+		t->max_prev_w = t->float_w; t->max_prev_h = t->float_h;
+	} else {
+		t->max_prev_x = t->tile_x; t->max_prev_y = t->tile_y;
+		t->max_prev_w = t->tile_w; t->max_prev_h = t->tile_h;
+	}
+	t->maximized = true;
+	wlr_xdg_toplevel_set_maximized(t->xdg_toplevel, true);
+	vile_tile(server);
+	vile_focus_toplevel(server, t);
+	wlr_log(WLR_INFO, "Vile: maximized '%s'",
+		t->xdg_toplevel->title ? t->xdg_toplevel->title : "?");
+}
+
+static void vile_unmaximize(struct vile_server *server,
+		struct vile_toplevel *t) {
+	if (!t || !t->maximized) {
+		return;
+	}
+	t->maximized = false;
+	if (t->max_was_floating) {
+		t->floating = true;
+		t->float_x = t->max_prev_x; t->float_y = t->max_prev_y;
+		t->float_w = t->max_prev_w; t->float_h = t->max_prev_h;
+	} else {
+		t->floating = false;
+	}
+	wlr_xdg_toplevel_set_maximized(t->xdg_toplevel, false);
+	vile_tile(server);
+	wlr_log(WLR_INFO, "Vile: unmaximized '%s'",
+		t->xdg_toplevel->title ? t->xdg_toplevel->title : "?");
+}
+
 static void vile_toplevel_request_maximize(struct wl_listener *listener, void *data) {
-	/* Piece 2 has no maximize support yet — but the protocol still
-	 * needs a configure reply or the client will wait forever. */
 	struct vile_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_maximize);
-	if (toplevel->xdg_toplevel->base->initialized) {
-		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	struct vile_server *server = toplevel->server;
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		return;
 	}
+	/* The old stub only scheduled a configure, so foot's maximize
+	 * button did nothing visible. Now the window really fills the
+	 * work area (and comes back on a second click). */
+	bool want = toplevel->xdg_toplevel->requested.maximized;
+	if (want) {
+		vile_maximize(server, toplevel);
+	} else {
+		vile_unmaximize(server, toplevel);
+	}
+}
+
+static void vile_toplevel_request_minimize(struct wl_listener *listener, void *data) {
+	struct vile_toplevel *toplevel =
+		wl_container_of(listener, toplevel, request_minimize);
+	struct vile_server *server = toplevel->server;
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		return;
+	}
+	/* Minimized is not a configure state in xdg-shell, so the
+	 * ack is a plain configure — the hide/show is ours. The
+	 * window comes back from a dock click or Super+J/K focus. */
+	bool want = toplevel->xdg_toplevel->requested.minimized;
+	if (want) {
+		vile_minimize(server, toplevel);
+	} else {
+		vile_unminimize(server, toplevel);
+	}
+	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+}
+
+static void vile_toplevel_request_move(struct wl_listener *listener, void *data) {
+	struct vile_toplevel *toplevel =
+		wl_container_of(listener, toplevel, request_move);
+	struct vile_server *server = toplevel->server;
+	/* Client-initiated move (foot's title-bar drag, GTK header
+	 * bar drag): the compositor takes the pointer and the window
+	 * follows it until release. */
+	vile_grab_begin_move(server, toplevel);
+}
+
+static void vile_toplevel_request_resize(struct wl_listener *listener, void *data) {
+	struct vile_toplevel *toplevel =
+		wl_container_of(listener, toplevel, request_resize);
+	struct vile_server *server = toplevel->server;
+	struct wlr_xdg_toplevel_resize_event *event = data;
+	/* Client-initiated resize (window edge drag). */
+	vile_grab_begin_resize(server, toplevel, event->edges);
 }
 
 static void vile_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
@@ -2471,7 +3420,9 @@ static void vile_server_new_xdg_toplevel(struct wl_listener *listener, void *dat
 	 * hidden and placed BELOW the window tree so it frames the
 	 * window instead of covering it. */
 	{
-		const float dim[4] = { 0.25f, 0.24f, 0.33f, 1.0f };
+		const struct vile_palette *pal = vile_pal(server->theme_light);
+		const float dim[4] = { pal->border_dim[0], pal->border_dim[1],
+			pal->border_dim[2], 1.0f };
 		toplevel->border = wlr_scene_rect_create(
 			&server->scene->tree, 8, 8, dim);
 		if (toplevel->border) {
@@ -2497,6 +3448,15 @@ static void vile_server_new_xdg_toplevel(struct wl_listener *listener, void *dat
 	toplevel->request_fullscreen.notify = vile_toplevel_request_fullscreen;
 	wl_signal_add(&xdg_toplevel->events.request_fullscreen,
 		&toplevel->request_fullscreen);
+	toplevel->request_minimize.notify = vile_toplevel_request_minimize;
+	wl_signal_add(&xdg_toplevel->events.request_minimize,
+		&toplevel->request_minimize);
+	toplevel->request_move.notify = vile_toplevel_request_move;
+	wl_signal_add(&xdg_toplevel->events.request_move,
+		&toplevel->request_move);
+	toplevel->request_resize.notify = vile_toplevel_request_resize;
+	wl_signal_add(&xdg_toplevel->events.request_resize,
+		&toplevel->request_resize);
 	wlr_log(WLR_INFO, "Vile: new xdg toplevel, waiting for its first commit");
 }
 
@@ -2784,103 +3744,12 @@ static struct wlr_buffer *vile_paint_cairo(struct vile_server *server,
 	return buf;
 }
 
-/* Arch logo overlay (Nov 10, 2026 — Adnan: "when you changed the
- * bg wallpaper the logo is gone, not like in Arch"). The transparent
- * Arch logo is drawn centred over the wallpaper, under windows and
- * under the shell, so it stays visible no matter which wallpaper is
- * set — like the logo baked into the Arch wallpaper, except it no
- * longer disappears when the wallpaper changes. The node is created
- * in main() right after the wallpaper node and before any window
- * exists, so scene order puts it between the wallpaper and the
- * windows. Failure is non-fatal: the desktop works without it.
- * (Adnan briefly asked for the Vile V here instead, then reversed
- * it: "Nv leav it as its" — Arch overlay stands; the ribbon V stays
- * in the bar tile, dock icon, and wizard welcome only.) */
-static bool vile_load_logo(struct vile_server *server) {
-	const char *paths[] = {
-		"../assets/arch-logo.png",
-		"assets/arch-logo.png",
-		NULL,
-	};
-	cairo_surface_t *img = NULL;
-	for (int i = 0; paths[i]; i++) {
-		img = cairo_image_surface_create_from_png(paths[i]);
-		if (cairo_surface_status(img) == CAIRO_STATUS_SUCCESS) {
-			wlr_log(WLR_INFO,
-				"Vile: Arch logo overlay loaded from '%s'",
-				paths[i]);
-			break;
-		}
-		cairo_surface_destroy(img);
-		img = NULL;
-	}
-	if (!img) {
-		const char *home = getenv("HOME");
-		if (home) {
-			char p[1024];
-			const char *homes[] = {
-				"%s/vile-os/assets/arch-logo.png",
-				"%s/workspace/vile-os/assets/arch-logo.png",
-				NULL,
-			};
-			for (int i = 0; homes[i]; i++) {
-				snprintf(p, sizeof(p), homes[i], home);
-				img = cairo_image_surface_create_from_png(p);
-				if (cairo_surface_status(img) ==
-						CAIRO_STATUS_SUCCESS) {
-					wlr_log(WLR_INFO,
-						"Vile: Arch logo overlay loaded from '%s'",
-						p);
-					break;
-				}
-				cairo_surface_destroy(img);
-				img = NULL;
-			}
-		}
-	}
-	if (!img) {
-		wlr_log(WLR_ERROR,
-			"Vile: arch-logo.png not found — desktop has no logo overlay");
-		return false;
-	}
-	int w = cairo_image_surface_get_width(img);
-	int h = cairo_image_surface_get_height(img);
-	struct wlr_buffer *buf = vile_paint_cairo(server, img, w, h);
-	cairo_surface_destroy(img);
-	if (!buf) {
-		wlr_log(WLR_ERROR, "Vile: logo buffer paint failed");
-		return false;
-	}
-	server->logo_buffer = buf;
-	server->logo_node = wlr_scene_buffer_create(&server->scene->tree, buf);
-	if (!server->logo_node) {
-		wlr_log(WLR_ERROR, "Vile: logo scene node failed");
-		wlr_buffer_drop(buf);
-		server->logo_buffer = NULL;
-		return false;
-	}
-	/* 0.9 opacity: the logo reads as part of the wallpaper, not a
-	 * sticker on top of it. The startup animation fades it in
-	 * from 0 alongside the wallpaper. */
-	wlr_scene_buffer_set_opacity(server->logo_node, 0.9f);
-	wlr_log(WLR_INFO, "Vile: Arch logo overlay node in scene (%dx%d)", w, h);
-	return true;
-}
-
-static void vile_fit_logo(struct vile_server *server, int out_w, int out_h) {
-	if (!server->logo_node) {
-		return;
-	}
-	/* ~45% of output height, square — resolution-aware, the same
-	 * scale-with-height rule as the desktop clock. */
-	int size = (int)(0.45 * out_h + 0.5);
-	if (size < 1) {
-		size = 1;
-	}
-	wlr_scene_buffer_set_dest_size(server->logo_node, size, size);
-	wlr_scene_node_set_position(&server->logo_node->node,
-		(out_w - size) / 2, (out_h - size) / 2);
-}
+/* No Arch logo overlay (Nov 10, 2026 ~16:31 — Adnan, twice:
+ * the logo must not be stamped on ANY wallpaper. The three
+ * overlay functions (load / fit / reload) were deleted
+ * entirely; the Arch wallpaper keeps its own baked-in logo,
+ * nebula/dunes show clean. The arch-logo.png assets stay
+ * on disk, unused.) */
 
 /* Hide or show every application window. Lock v2: while locked, no
  * window is rendered at all — the lock background is the ONLY thing
@@ -3081,13 +3950,14 @@ static void vile_lock_render(struct vile_server *server) {
 	struct tm tm;
 	localtime_r(&now, &tm);
 	char time_str[16], date_str[64];
+	const struct vile_palette *P = vile_pal(server->theme_light);
 	strftime(time_str, sizeof(time_str), "%H:%M", &tm);
 	strftime(date_str, sizeof(date_str), "%A, %B %d", &tm);
 
 	/* HUGE clock, centred, then the date below it. */
-	vile_draw_text_centre(cr, "Inter Light 150", 0.96, 0.95, 1.0,
+	vile_draw_text_centre(cr, "Inter Light 150", P->text_hi[0], P->text_hi[1], P->text_hi[2],
 		W / 2.0, H * 0.40, time_str);
-	vile_draw_text_centre(cr, "Inter 30", 0.79, 0.75, 0.95,
+	vile_draw_text_centre(cr, "Inter 30", P->date_hi[0], P->date_hi[1], P->date_hi[2],
 		W / 2.0, H * 0.40 + 115, date_str);
 
 	/* --- User card, centred as a group --- */
@@ -3101,15 +3971,15 @@ static void vile_lock_render(struct vile_server *server) {
 	/* Username to the right of the avatar — the display name from
 	 * the Setup wizard when set, else the system username. */
 	double tx = av_x + av_d + 28;
-	vile_draw_text_at(cr, "Inter Bold 34", 0.96, 0.95, 1.0,
+	vile_draw_text_at(cr, "Inter Bold 34", P->text_hi[0], P->text_hi[1], P->text_hi[2],
 		tx, card_y + 8, vile_lock_display_name(server));
 	/* Padlock glyph + LOCKED label below the username. */
-	vile_draw_lock_glyph(cr, tx, card_y + 66, 22, 0.72, 0.69, 0.82);
-	vile_draw_text_at(cr, "Inter Bold 17", 0.72, 0.69, 0.82,
+	vile_draw_lock_glyph(cr, tx, card_y + 66, 22, P->text2[0], P->text2[1], P->text2[2]);
+	vile_draw_text_at(cr, "Inter Bold 17", P->text2[0], P->text2[1], P->text2[2],
 		tx + 30, card_y + 64, "LOCKED");
 	/* Password field to the right of the avatar, below the name. */
 	double fx = tx, fy = card_y + 108, fw = 360, fh = 60;
-	cairo_set_source_rgba(cr, 0.04, 0.03, 0.08, 0.65);
+	cairo_set_source_rgba(cr, P->field_rgb[0], P->field_rgb[1], P->field_rgb[2], 0.65);
 	vile_rounded_rect(cr, fx, fy, fw, fh, 14);
 	cairo_fill(cr);
 	if (server->lock_failed) {
@@ -3124,12 +3994,12 @@ static void vile_lock_render(struct vile_server *server) {
 	 * Hide-password toggle is off. */
 	size_t n = server->lock_password_len;
 	if (server->lock_show_password && n > 0) {
-		vile_draw_text_centre(cr, "Inter 24", 1.0, 1.0, 1.0,
+		vile_draw_text_centre(cr, "Inter 24", P->white[0], P->white[1], P->white[2],
 			fx + fw / 2, fy + fh / 2, server->lock_password);
 	} else {
 		for (size_t i = 0; i < n; i++) {
 			double cx = fx + fw / 2 + (i - (n - 1) / 2.0) * 28.0;
-			cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+			cairo_set_source_rgb(cr, P->white[0], P->white[1], P->white[2]);
 			cairo_arc(cr, cx, fy + fh / 2.0, 8, 0, 2 * M_PI);
 			cairo_fill(cr);
 		}
@@ -3139,7 +4009,7 @@ static void vile_lock_render(struct vile_server *server) {
 		vile_draw_text_centre(cr, "Inter 22", 1.0, 0.48, 0.48,
 			W / 2.0, card_y + 208, "Wrong password — try again");
 	} else if (n == 0) {
-		vile_draw_text_centre(cr, "Inter 20", 0.54, 0.50, 0.66,
+		vile_draw_text_centre(cr, "Inter 20", P->hint[0], P->hint[1], P->hint[2],
 			W / 2.0, card_y + 208, "Type your password and press Enter");
 	}
 
@@ -3147,14 +4017,14 @@ static void vile_lock_render(struct vile_server *server) {
 	double gx = W - 76, gy = H - 76, gs = 52;
 	server->lock_gear_rect = (struct wlr_box){
 		.x = (int)gx, .y = (int)gy, .width = (int)gs, .height = (int)gs };
-	cairo_set_source_rgba(cr, 0.04, 0.03, 0.08, 0.60);
+	cairo_set_source_rgba(cr, P->field_rgb[0], P->field_rgb[1], P->field_rgb[2], 0.60);
 	cairo_arc(cr, gx + gs / 2, gy + gs / 2, gs / 2, 0, 2 * M_PI);
 	cairo_fill(cr);
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.35);
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.35);
 	cairo_set_line_width(cr, 1.5);
 	cairo_arc(cr, gx + gs / 2, gy + gs / 2, gs / 2, 0, 2 * M_PI);
 	cairo_stroke(cr);
-	vile_draw_gear(cr, gx + gs / 2, gy + gs / 2, 13, 0.9, 0.9, 0.95);
+	vile_draw_gear(cr, gx + gs / 2, gy + gs / 2, 13, P->glyph[0], P->glyph[1], P->glyph[2]);
 
 	/* --- Settings panel (only when the gear opened it) --- */
 	server->lock_toggle_rect = (struct wlr_box){ 0 };
@@ -3163,41 +4033,41 @@ static void vile_lock_render(struct vile_server *server) {
 	server->lock_close_rect = (struct wlr_box){ 0 };
 	if (server->lock_settings_open) {
 		double px = W - 24 - 320, py = H * 0.648, pw = 320, ph = 280;
-		cairo_set_source_rgba(cr, 0.04, 0.03, 0.08, 0.72);
+		cairo_set_source_rgba(cr, P->field_rgb[0], P->field_rgb[1], P->field_rgb[2], 0.72);
 		vile_rounded_rect(cr, px, py, pw, ph, 16);
 		cairo_fill(cr);
-		cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.12);
+		cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.12);
 		cairo_set_line_width(cr, 1.5);
 		vile_rounded_rect(cr, px, py, pw, ph, 16);
 		cairo_stroke(cr);
 		double ix = px + 24;
-		vile_draw_text_at(cr, "Inter Bold 13", 0.55, 0.52, 0.62,
+		vile_draw_text_at(cr, "Inter Bold 13", P->muted[0], P->muted[1], P->muted[2],
 			ix, py + 18, "SETTINGS");
-		vile_draw_text_at(cr, "Inter 26", 0.85, 0.84, 0.9,
+		vile_draw_text_at(cr, "Inter 26", P->close_x[0], P->close_x[1], P->close_x[2],
 			px + pw - 44, py + 10, "×");
 		server->lock_close_rect = (struct wlr_box){
 			.x = (int)(px + pw - 48), .y = (int)(py + 8),
 			.width = 36, .height = 36 };
-		vile_draw_text_at(cr, "Inter 20", 0.92, 0.91, 0.95,
+		vile_draw_text_at(cr, "Inter 20", P->panel_val[0], P->panel_val[1], P->panel_val[2],
 			ix, py + 58, "Hide password");
 		vile_draw_toggle(cr, px + pw - 24 - 64, py + 56, 64, 30,
 			!server->lock_show_password);
 		server->lock_toggle_rect = (struct wlr_box){
 			.x = (int)(px + pw - 24 - 64), .y = (int)(py + 56),
 			.width = 64, .height = 30 };
-		vile_draw_text_at(cr, "Inter 18", 0.55, 0.52, 0.62,
+		vile_draw_text_at(cr, "Inter 18", P->muted[0], P->muted[1], P->muted[2],
 			ix, py + 106, "Reveal delay");
-		vile_draw_text_at(cr, "Inter 18", 0.55, 0.52, 0.62,
+		vile_draw_text_at(cr, "Inter 18", P->muted[0], P->muted[1], P->muted[2],
 			px + pw - 24 - vile_text_width(cr, "Inter 18", "300 ms"),
 			py + 106, "300 ms");
-		vile_draw_text_at(cr, "Inter Bold 13", 0.55, 0.52, 0.62,
+		vile_draw_text_at(cr, "Inter Bold 13", P->muted[0], P->muted[1], P->muted[2],
 			ix, py + 150, "SYSTEM");
-		vile_draw_text_at(cr, "Inter 20", 0.92, 0.91, 0.95,
+		vile_draw_text_at(cr, "Inter 20", P->panel_val[0], P->panel_val[1], P->panel_val[2],
 			ix, py + 182, "Reboot");
 		server->lock_reboot_rect = (struct wlr_box){
 			.x = (int)px, .y = (int)(py + 176),
 			.width = (int)pw, .height = 36 };
-		vile_draw_text_at(cr, "Inter 20", 0.92, 0.91, 0.95,
+		vile_draw_text_at(cr, "Inter 20", P->panel_val[0], P->panel_val[1], P->panel_val[2],
 			ix, py + 222, "Power Off");
 		server->lock_poweroff_rect = (struct wlr_box){
 			.x = (int)px, .y = (int)(py + 216),
@@ -3205,7 +4075,7 @@ static void vile_lock_render(struct vile_server *server) {
 	}
 
 	/* --- Minimal bottom-centre status --- */
-	vile_draw_text_centre(cr, "Inter 16", 0.60, 0.58, 0.70,
+	vile_draw_text_centre(cr, "Inter 16", P->status[0], P->status[1], P->status[2],
 		W / 2.0, H - 32, "EN  •  Vile OS");
 
 	cairo_destroy(cr);
@@ -3260,6 +4130,47 @@ static int vile_clock_timer(void *data) {
 	return 0;
 }
 
+/* Lock background for the current theme: the pre-blurred wallpaper
+ * (dark) or its lightened twin (light), falling back to the normal
+ * wallpaper buffer. Shared by vile_lock_create and the live theme
+ * switch (vile_lock_reload_bg). */
+static struct wlr_buffer *vile_paint_lock_bg(struct vile_server *server,
+		int *out_w, int *out_h) {
+	const char *name = server->theme_light ?
+		"vile-purple-arch-blur-light.jpg" : "vile-purple-arch-blur.jpg";
+	char p1[1024], p2[1024];
+	snprintf(p1, sizeof(p1), "../wallpapers/%s", name);
+	snprintf(p2, sizeof(p2), "wallpapers/%s", name);
+	struct wlr_buffer *buf = vile_paint_file_to_buffer(server,
+		p1, out_w, out_h);
+	if (!buf) {
+		buf = vile_paint_file_to_buffer(server, p2, out_w, out_h);
+	}
+	return buf;
+}
+
+/* Live lock-background reload (theme switch while locked): swap the
+ * buffer on the existing node, keeping its size and position. */
+static void vile_lock_reload_bg(struct vile_server *server) {
+	if (!server->lock_bg_node) {
+		return;
+	}
+	int w = 0, h = 0;
+	struct wlr_buffer *buf = vile_paint_lock_bg(server, &w, &h);
+	if (!buf) {
+		return;
+	}
+	struct wlr_buffer *old = server->lock_bg_buffer;
+	server->lock_bg_buffer = buf;
+	wlr_scene_buffer_set_buffer(server->lock_bg_node, buf);
+	wlr_scene_buffer_set_dest_size(server->lock_bg_node,
+		server->lock_out_w > 0 ? server->lock_out_w : VILE_OUT_W,
+		server->lock_out_h > 0 ? server->lock_out_h : VILE_OUT_H);
+	if (old) {
+		wlr_buffer_drop(old);
+	}
+}
+
 static void vile_lock_create(struct vile_server *server) {
 	server->lock_tree = wlr_scene_tree_create(&server->scene->tree);
 	if (!server->lock_tree) {
@@ -3273,15 +4184,10 @@ static void vile_lock_create(struct vile_server *server) {
 
 	/* Blurred wallpaper as the lock background (pre-blurred at
 	 * build time — a real-time blur every frame would be wasteful).
-	 * Falls back to the normal wallpaper buffer if the blur file
-	 * is missing. */
+	 * Theme-aware: light mode uses the lightened twin. Falls back
+	 * to the normal wallpaper buffer if the blur file is missing. */
 	int bg_w = 0, bg_h = 0;
-	server->lock_bg_buffer = vile_paint_file_to_buffer(server,
-		"../wallpapers/vile-purple-arch-blur.jpg", &bg_w, &bg_h);
-	if (!server->lock_bg_buffer) {
-		server->lock_bg_buffer = vile_paint_file_to_buffer(server,
-			"wallpapers/vile-purple-arch-blur.jpg", &bg_w, &bg_h);
-	}
+	server->lock_bg_buffer = vile_paint_lock_bg(server, &bg_w, &bg_h);
 	if (server->lock_bg_buffer) {
 		server->lock_bg_node = wlr_scene_buffer_create(
 			server->lock_tree, server->lock_bg_buffer);
@@ -3291,8 +4197,11 @@ static void vile_lock_create(struct vile_server *server) {
 			server->lock_tree, server->wallpaper_buffer);
 	}
 	/* A light extra dim so the white clock reads clearly on the
-	 * already-darkened blur. */
-	const float dim[4] = { 0.04f, 0.03f, 0.07f, 0.30f };
+	 * already-darkened blur. In light mode the dim is white, so
+	 * the dark clock reads on the light blur. */
+	const struct vile_palette *pal = vile_pal(server->theme_light);
+	const float dim[4] = { pal->dim_rgb[0], pal->dim_rgb[1],
+		pal->dim_rgb[2], 0.30f };
 	server->lock_dim = wlr_scene_rect_create(server->lock_tree,
 		VILE_OUT_W, VILE_OUT_H, dim);
 	server->lock_ui_node = wlr_scene_buffer_create(server->lock_tree, NULL);
@@ -3519,7 +4428,7 @@ static void vile_lock_attempt(struct vile_server *server) {
 #define VILE_DOCK_PAD 12
 #define VILE_DOCK_GAP 16
 #define VILE_MENU_W 300
-#define VILE_MENU_H 312
+#define VILE_MENU_H 352
 
 static bool vile_box_contains(struct wlr_box *b, int x, int y) {
 	return x >= b->x && x < b->x + b->width &&
@@ -3802,6 +4711,405 @@ static cairo_surface_t *vile_shell_build_bar_frost(
 	return frost;
 }
 
+/* Dock frost (Frosted dock, Nov 10, 2026 ~19:52 — macOS-style):
+ * the same blur technique as the bar frost, but for the
+ * wallpaper rectangle behind the dock pill (output coords
+ * x, y, w, h) instead of the full-width bar strip. Returns a
+ * w x h blurred surface, or NULL (caller falls back to a plain
+ * translucent tint — the dock still reads as a pill). The
+ * function is separate from the bar builder on purpose: the
+ * bar path is proven and must not change. */
+static cairo_surface_t *vile_shell_build_dock_frost(
+		struct vile_server *server, int x, int y, int w, int h) {
+	(void)server;
+	const char *path = vile_wallpaper_path();
+	if (!path || w <= 0 || h <= 0) {
+		return NULL;
+	}
+	int ww = 0, wh = 0, ch = 0;
+	unsigned char *px = stbi_load(path, &ww, &wh, &ch, 4);
+	if (!px) {
+		return NULL;
+	}
+	/* Cover-fit geometry — the same math as vile_fit_wallpaper, so
+	 * the crop matches the wallpaper pixels actually on screen
+	 * behind the dock. */
+	int out_w = server->shell_w, out_h = server->shell_h;
+	double scale = fmax((double)out_w / ww, (double)out_h / wh);
+	double dw = ww * scale, dh = wh * scale;
+	double ox = (out_w - dw) / 2.0, oy = (out_h - dh) / 2.0;
+	double sx0 = ((double)x - ox) / scale;
+	double sy0 = ((double)y - oy) / scale;
+	double sw = (double)w / scale;
+	double sh = (double)h / scale;
+	int ix0 = (int)floor(sx0), iy0 = (int)floor(sy0);
+	int ix1 = (int)ceil(sx0 + sw), iy1 = (int)ceil(sy0 + sh);
+	if (ix0 < 0) ix0 = 0;
+	if (iy0 < 0) iy0 = 0;
+	if (ix1 > ww) ix1 = ww;
+	if (iy1 > wh) iy1 = wh;
+	int cw = ix1 - ix0, chh = iy1 - iy0;
+	if (cw <= 0 || chh <= 0) {
+		stbi_image_free(px);
+		return NULL;
+	}
+	/* Swizzle the crop RGBA -> cairo ARGB32 (BGRA in memory on
+	 * little-endian). Only the rect is swizzled, not the whole
+	 * image. */
+	cairo_surface_t *crop = cairo_image_surface_create(
+		CAIRO_FORMAT_ARGB32, cw, chh);
+	if (cairo_surface_status(crop) != CAIRO_STATUS_SUCCESS) {
+		stbi_image_free(px);
+		return NULL;
+	}
+	unsigned char *dst = cairo_image_surface_get_data(crop);
+	int dstride = cairo_image_surface_get_stride(crop);
+	for (int yy = 0; yy < chh; yy++) {
+		const unsigned char *src =
+			px + ((size_t)(iy0 + yy) * ww + ix0) * 4;
+		unsigned char *row = dst + (size_t)yy * dstride;
+		for (int xx = 0; xx < cw; xx++) {
+			row[xx * 4 + 0] = src[xx * 4 + 2]; /* B */
+			row[xx * 4 + 1] = src[xx * 4 + 1]; /* G */
+			row[xx * 4 + 2] = src[xx * 4 + 0]; /* R */
+			row[xx * 4 + 3] = src[xx * 4 + 3]; /* A */
+		}
+	}
+	cairo_surface_mark_dirty(crop);
+	stbi_image_free(px);
+	/* Blur: downscale hard, then upscale bilinear. */
+	int tw = w / 16;
+	if (tw < 1) tw = 1;
+	int th = h / 16;
+	if (th < 1) th = 1;
+	cairo_surface_t *tiny = cairo_image_surface_create(
+		CAIRO_FORMAT_ARGB32, tw, th);
+	cairo_t *cr = cairo_create(tiny);
+	cairo_scale(cr, (double)tw / cw, (double)th / chh);
+	cairo_set_source_surface(cr, crop, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr),
+		CAIRO_FILTER_BILINEAR);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_destroy(crop);
+	cairo_surface_t *frost = cairo_image_surface_create(
+		CAIRO_FORMAT_ARGB32, w, h);
+	cr = cairo_create(frost);
+	cairo_scale(cr, (double)w / tw, (double)h / th);
+	cairo_set_source_surface(cr, tiny, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr),
+		CAIRO_FILTER_BILINEAR);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_destroy(tiny);
+	return frost;
+}
+
+/* Dock (Nov 10, 2026 ~16:31 — frosted (v3, Nov 10 ~19:52), ordered, reorderable,
+ * unpinnable, with a Setup lifecycle icon). The dock is an ordered
+ * list of app ids (dock_order[0..dock_n-1]), NOT four fixed slots.
+ * The pinned set persists in ~/.config/vile/dock-pinned (one app id
+ * per line, in order); when the file is missing the default is
+ * foot, settings, screenfit, files. The Setup icon is appended at
+ * the END while first-run setup is incomplete (no setup-done
+ * marker) and not unpinned (no dock-setup-hidden marker); it is
+ * NOT stored in dock-pinned, so its position never persists. */
+
+/* Path helper: ~/.config/vile/<name>. */
+static bool vile_dock_config_path(char *buf, size_t len, const char *name) {
+	const char *home = getenv("HOME");
+	if (!home) {
+		return false;
+	}
+	snprintf(buf, len, "%s/.config/vile/%s", home, name);
+	return true;
+}
+
+static int vile_dock_app_from_name(const char *name) {
+	for (int i = 0; i < DOCK_APP_COUNT; i++) {
+		if (strcmp(name, vile_dock_app_names[i]) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* First-run setup is incomplete while ~/.config/vile/setup-done
+ * does not exist. This does NOT check VILE_NO_SETUP (that env var
+ * only stops the wizard auto-opening; the dock icon is about the
+ * marker, so it still shows in test harnesses that set it). */
+static bool vile_dock_setup_incomplete(void) {
+	char path[1024];
+	if (!vile_dock_config_path(path, sizeof(path), "setup-done")) {
+		return false;
+	}
+	struct stat st;
+	return stat(path, &st) != 0;
+}
+
+/* The user unpinned the Setup icon (right-click -> Unpin). */
+static bool vile_dock_setup_hidden(void) {
+	char path[1024];
+	if (!vile_dock_config_path(path, sizeof(path), "dock-setup-hidden")) {
+		return false;
+	}
+	struct stat st;
+	return stat(path, &st) == 0;
+}
+
+/* Slot of an app in the current order, or -1. */
+static int vile_dock_slot_of_app(struct vile_server *server, int app) {
+	for (int i = 0; i < server->dock_n; i++) {
+		if (server->dock_order[i] == app) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* Drop slot for a reorder drag: the slot whose centre is nearest
+ * the pointer x (clamped to the dock). The dragged app moves to
+ * this slot; the others shift. */
+static int vile_dock_drop_slot(struct vile_server *server, double x) {
+	if (server->dock_n <= 0) {
+		return 0;
+	}
+	double rel = x - server->shell_dock_x - VILE_DOCK_PAD
+		- VILE_DOCK_ICON / 2.0;
+	int slot = (int)(rel / (VILE_DOCK_ICON + VILE_DOCK_GAP) + 0.5);
+	if (slot < 0) {
+		slot = 0;
+	}
+	if (slot > server->dock_n - 1) {
+		slot = server->dock_n - 1;
+	}
+	return slot;
+}
+
+/* Slot under an output point, or -1 (between icons / outside). */
+static int vile_dock_slot_at(struct vile_server *server, int x, int y) {
+	for (int i = 0; i < server->dock_n; i++) {
+		if (vile_box_contains(&server->shell_dock_rects[i], x, y)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* Running-app count for a dock app (the shell_dock_*_n fields,
+ * kept by the 1s timer). Setup is not an app window: 0. */
+static int vile_dock_running_count(struct vile_server *server, int app) {
+	switch (app) {
+	case DOCK_FOOT:
+		return server->shell_dock_foot_n;
+	case DOCK_SETTINGS:
+		return server->shell_dock_set_n;
+	case DOCK_SCREENFIT:
+		return server->shell_dock_screenfit_n;
+	case DOCK_FILES:
+		return server->shell_dock_files_n;
+	default:
+		return 0;
+	}
+}
+
+/* Centres log line (the harnesses parse it: 'dock foot icon
+ * centre (X,Y)', 'settings centre', 'screenfit centre', 'files
+ * centre' — keep those tokens; a setup centre is appended when
+ * the Setup icon is shown). An app not on the dock logs (0,0).
+ * Logged at shell create and on every dock order change, so a
+ * harness can re-parse the latest line. */
+static void vile_dock_log_centres(struct vile_server *server) {
+	int cx[DOCK_APP_COUNT], cy[DOCK_APP_COUNT];
+	for (int a = 0; a < DOCK_APP_COUNT; a++) {
+		cx[a] = 0;
+		cy[a] = 0;
+	}
+	for (int i = 0; i < server->dock_n; i++) {
+		int app = server->dock_order[i];
+		cx[app] = server->shell_dock_rects[i].x
+			+ server->shell_dock_rects[i].width / 2;
+		cy[app] = server->shell_dock_rects[i].y
+			+ server->shell_dock_rects[i].height / 2;
+	}
+	/* Entry count first (the dock harness checks "dock: N entries"
+	 * to prove the Setup icon appeared / disappeared). */
+	wlr_log(WLR_INFO, "Vile: dock: %d entries", server->dock_n);
+	if (server->dock_setup_shown) {
+		wlr_log(WLR_INFO, "Vile: shell: dock foot icon centre "
+			"(%d,%d), settings centre (%d,%d), screenfit centre "
+			"(%d,%d), files centre (%d,%d), setup centre (%d,%d)",
+			cx[DOCK_FOOT], cy[DOCK_FOOT],
+			cx[DOCK_SETTINGS], cy[DOCK_SETTINGS],
+			cx[DOCK_SCREENFIT], cy[DOCK_SCREENFIT],
+			cx[DOCK_FILES], cy[DOCK_FILES],
+			cx[DOCK_SETUP], cy[DOCK_SETUP]);
+	} else {
+		wlr_log(WLR_INFO, "Vile: shell: dock foot icon centre "
+			"(%d,%d), settings centre (%d,%d), screenfit centre "
+			"(%d,%d), files centre (%d,%d)",
+			cx[DOCK_FOOT], cy[DOCK_FOOT],
+			cx[DOCK_SETTINGS], cy[DOCK_SETTINGS],
+			cx[DOCK_SCREENFIT], cy[DOCK_SCREENFIT],
+			cx[DOCK_FILES], cy[DOCK_FILES]);
+	}
+}
+
+/* Load the pinned set from ~/.config/vile/dock-pinned (one app id
+ * per line, in order). Missing file -> the default order. A file
+ * that exists but is empty -> an empty dock (the user unpinned
+ * everything); a file whose lines are all invalid -> defaults
+ * (corrupt). The Setup icon is appended at the end when setup is
+ * incomplete and not unpinned. */
+static void vile_dock_load(struct vile_server *server) {
+	int defs[] = { DOCK_FOOT, DOCK_SETTINGS, DOCK_SCREENFIT,
+		DOCK_FILES };
+	int n = 0;
+	int lines = 0;
+	bool have_file = false;
+	char path[1024];
+	if (vile_dock_config_path(path, sizeof(path), "dock-pinned")) {
+		FILE *f = fopen(path, "r");
+		if (f) {
+			have_file = true;
+			char line[64];
+			while (fgets(line, sizeof(line), f)
+					&& n < VILE_DOCK_MAX - 1) {
+				lines++;
+				size_t len = strlen(line);
+				while (len > 0 && (line[len - 1] == '\n'
+						|| line[len - 1] == '\r'
+						|| line[len - 1] == ' '
+						|| line[len - 1] == '\t')) {
+					line[--len] = '\0';
+				}
+				int app = vile_dock_app_from_name(line);
+				if (app < 0 || app == DOCK_SETUP) {
+					continue; /* setup is never pinned */
+				}
+				bool dup = false;
+				for (int i = 0; i < n; i++) {
+					if (server->dock_order[i] == app) {
+						dup = true;
+					}
+				}
+				if (!dup) {
+					server->dock_order[n++] = app;
+				}
+			}
+			fclose(f);
+		}
+	}
+	if (!have_file || (lines > 0 && n == 0)) {
+		/* Missing, or corrupt (lines but nothing valid): defaults. */
+		n = 0;
+		for (int i = 0; i < 4; i++) {
+			server->dock_order[n++] = defs[i];
+		}
+	}
+	server->dock_n = n;
+	server->dock_setup_shown = false;
+	if (vile_dock_setup_incomplete() && !vile_dock_setup_hidden()) {
+		server->dock_order[server->dock_n++] = DOCK_SETUP;
+		server->dock_setup_shown = true;
+	}
+}
+
+/* Persist the pinned set (setup excluded) in displayed order.
+ * Creates ~/.config/vile if needed. */
+static void vile_dock_save(struct vile_server *server) {
+	const char *home = getenv("HOME");
+	if (!home) {
+		return;
+	}
+	char dir[1024];
+	snprintf(dir, sizeof(dir), "%s/.config", home);
+	mkdir(dir, 0755);
+	snprintf(dir, sizeof(dir), "%s/.config/vile", home);
+	mkdir(dir, 0755);
+	char path[1024];
+	if (!vile_dock_config_path(path, sizeof(path), "dock-pinned")) {
+		return;
+	}
+	FILE *f = fopen(path, "w");
+	if (!f) {
+		wlr_log(WLR_INFO, "Vile: dock: could not save pinned set (%s)",
+			path);
+		return;
+	}
+	for (int i = 0; i < server->dock_n; i++) {
+		int app = server->dock_order[i];
+		if (app == DOCK_SETUP) {
+			continue;
+		}
+		fprintf(f, "%s\n", vile_dock_app_names[app]);
+	}
+	fclose(f);
+	wlr_log(WLR_INFO, "Vile: dock: pinned set saved");
+}
+
+/* Dock geometry from dock_n: centred, growing symmetrically from
+ * the middle as entries are added. Called by vile_shell_fit and
+ * after every order change. */
+static void vile_dock_layout(struct vile_server *server) {
+	int n = server->dock_n;
+	int dock_w = VILE_DOCK_PAD * 2 + VILE_DOCK_ICON * n
+		+ VILE_DOCK_GAP * (n > 0 ? n - 1 : 0);
+	server->shell_dock_x = (server->shell_w - dock_w) / 2;
+	server->shell_dock_y = server->shell_h - VILE_BAR_H
+		- VILE_TILE_GAP - VILE_DOCK_H;
+	server->shell_dock_rect = (struct wlr_box){
+		.x = server->shell_dock_x,
+		.y = server->shell_dock_y,
+		.width = dock_w,
+		.height = VILE_DOCK_H };
+	for (int i = 0; i < n; i++) {
+		server->shell_dock_rects[i] = (struct wlr_box){
+			.x = server->shell_dock_x + VILE_DOCK_PAD
+				+ i * (VILE_DOCK_ICON + VILE_DOCK_GAP),
+			.y = server->shell_dock_y + VILE_DOCK_PAD,
+			.width = VILE_DOCK_ICON,
+			.height = VILE_DOCK_ICON };
+	}
+	if (server->shell_dock_node) {
+		wlr_scene_node_set_position(&server->shell_dock_node->node,
+			server->shell_dock_x - 40, server->shell_dock_y - 20);
+	}
+}
+
+/* Setup lifecycle: the wizard writes setup-done, and the dock
+ * icon must disappear by itself (within a second, via the 1s
+ * timer). Returns true if the order changed. The cached state is
+ * updated BEFORE re-laying out, so the nested refresh from
+ * vile_shell_fit sees no change (recursion bound to one level). */
+static bool vile_dock_refresh(struct vile_server *server) {
+	bool want_setup = vile_dock_setup_incomplete()
+		&& !vile_dock_setup_hidden();
+	if (want_setup == server->dock_setup_shown) {
+		return false;
+	}
+	server->dock_setup_shown = want_setup;
+	if (want_setup) {
+		if (vile_dock_slot_of_app(server, DOCK_SETUP) < 0) {
+			server->dock_order[server->dock_n++] = DOCK_SETUP;
+		}
+	} else {
+		int slot = vile_dock_slot_of_app(server, DOCK_SETUP);
+		if (slot >= 0) {
+			memmove(&server->dock_order[slot],
+				&server->dock_order[slot + 1],
+				(server->dock_n - slot - 1) * sizeof(int));
+			server->dock_n--;
+		}
+	}
+	vile_dock_layout(server);
+	vile_shell_render_dock(server);
+	vile_dock_log_centres(server);
+	wlr_log(WLR_INFO, "Vile: dock: setup icon %s",
+		want_setup ? "shown" : "gone (setup complete)");
+	return true;
+}
+
 static void vile_shell_render_bar(struct vile_server *server) {
 	int W = server->shell_w, H = VILE_BAR_H;
 	if (W <= 0) {
@@ -3811,6 +5119,7 @@ static void vile_shell_render_bar(struct vile_server *server) {
 	 * y = shell_h - VILE_BAR_H, so the click rects below are in
 	 * output coords, not surface coords. */
 	int bar_y = server->shell_h - VILE_BAR_H;
+	const struct vile_palette *P = vile_pal(server->theme_light);
 	cairo_surface_t *surf = cairo_image_surface_create(
 		CAIRO_FORMAT_ARGB32, W, H);
 	cairo_t *cr = cairo_create(surf);
@@ -3847,21 +5156,21 @@ static void vile_shell_render_bar(struct vile_server *server) {
 		cairo_paint(cr);
 		/* Dark tint over the frost — translucent dark, never a
 		 * solid white bar. */
-		cairo_set_source_rgba(cr, 0.06, 0.04, 0.11, 0.55);
+		cairo_set_source_rgba(cr, P->bar_rgb[0], P->bar_rgb[1], P->bar_rgb[2], 0.55);
 		cairo_rectangle(cr, 0, 0, W, H);
 		cairo_fill(cr);
 	} else {
 		/* No wallpaper to sample (should not happen — the
 		 * default wallpaper always exists): flat translucent
 		 * dark, like the old bar. */
-		cairo_set_source_rgba(cr, 0.05, 0.035, 0.09, 0.72);
+		cairo_set_source_rgba(cr, P->panel_rgb[0], P->panel_rgb[1], P->panel_rgb[2], 0.72);
 		cairo_rectangle(cr, 0, 0, W, H);
 		cairo_fill(cr);
 	}
 	/* Hairline on the TOP edge — the separator between the
 	 * desktop and the bar — with a faint purple rim light just
 	 * below it. */
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.14);
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.14);
 	cairo_rectangle(cr, 0, 0, W, 1);
 	cairo_fill(cr);
 	cairo_set_source_rgba(cr, 0.43, 0.29, 1.0, 0.18);
@@ -3876,65 +5185,22 @@ static void vile_shell_render_bar(struct vile_server *server) {
 	strftime(date_str, sizeof(date_str), "%a %d %b", &tm);
 	double cy = H / 2.0;
 
-	/* Left: V tile + "Vile". (Workspace pills removed Nov 10, 2026 —
-	 * Adnan didn't know what they were and asked for them gone.) */
-	/* Soft purple glow behind the tile. */
-	cairo_pattern_t *glow = cairo_pattern_create_radial(
-		28, cy, 4, 28, cy, 30);
-	cairo_pattern_add_color_stop_rgba(glow, 0,
-		0.43, 0.29, 1.0, 0.35);
-	cairo_pattern_add_color_stop_rgba(glow, 1,
-		0.43, 0.29, 1.0, 0.0);
-	cairo_set_source(cr, glow);
-	cairo_rectangle(cr, 0, 0, 60, H);
-	cairo_fill(cr);
-	cairo_pattern_destroy(glow);
-	/* Drop shadow, then the tile: the real ribbon V on a dark
-	 * #171228 tile (vile-logo-dark.png) — NOT the ribbon on a
-	 * purple tile, purple-on-purple has no contrast. Fallback
-	 * when the asset is missing: the old drawn purple tile + V,
-	 * so the bar never shows a blank. */
-	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35);
-	cairo_new_path(cr);
-	vile_rounded_rect(cr, 14, 8, 28, 28, 9);
-	cairo_fill(cr);
-	if (server->shell_vile_icon) {
-		cairo_save(cr);
-		cairo_translate(cr, 14, 6);
-		cairo_scale(cr, 28.0 / 1024, 28.0 / 1024);
-		cairo_set_source_surface(cr, server->shell_vile_icon, 0, 0);
-		cairo_paint(cr);
-		cairo_restore(cr);
-	} else {
-		cairo_pattern_t *tile = cairo_pattern_create_linear(0, 6, 0, 34);
-		cairo_pattern_add_color_stop_rgb(tile, 0, 0.55, 0.42, 1.0);
-		cairo_pattern_add_color_stop_rgb(tile, 1, 0.43, 0.29, 1.0);
-		cairo_set_source(cr, tile);
-		cairo_new_path(cr);
-		vile_rounded_rect(cr, 14, 6, 28, 28, 9);
-		cairo_fill(cr);
-		cairo_pattern_destroy(tile);
-		vile_draw_text_centre(cr, "Inter Bold 17", 1.0, 1.0, 1.0,
-			28, 21, "V");
-	}
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.25);
-	cairo_set_line_width(cr, 1);
-	cairo_new_path(cr);
-	vile_rounded_rect(cr, 14.5, 6.5, 27, 27, 8.5);
-	cairo_stroke(cr);
-	server->shell_logo_rect = (struct wlr_box){
-		.x = 14, .y = bar_y + 6, .width = 28, .height = 28 };
-	vile_draw_text_at(cr, "Inter Bold 16", 0.93, 0.91, 0.98,
-		52, 11, "Vile");
+	/* Left corner: EMPTY (Nov 10, 2026 ~16:31 — Adnan: "we know
+	 * what system we're on"). The glowing V tile + "Vile"
+	 * wordmark were deleted; the bar is just the centred clock
+	 * and the right status pill. The menu trigger is the status
+	 * pill (it already was); the old logo-click -> Settings
+	 * branch went with the tile — Settings is still one dock
+	 * click away, and the menu has its own Settings row. */
 
 	/* Centre: time in a larger semibold weight, date beside it
 	 * in a lighter secondary colour, both vertically centred. */
 	int tw = vile_text_width(cr, "Inter Bold 17", time_str);
 	int dw = vile_text_width(cr, "Inter 13", date_str);
 	double cx0 = W / 2.0 - (tw + 12 + dw) / 2.0;
-	vile_draw_text_at(cr, "Inter Bold 17", 0.93, 0.91, 0.98,
+	vile_draw_text_at(cr, "Inter Bold 17", P->text[0], P->text[1], P->text[2],
 		cx0, 10, time_str);
-	vile_draw_text_at(cr, "Inter 13", 0.68, 0.65, 0.78,
+	vile_draw_text_at(cr, "Inter 13", P->text3[0], P->text3[1], P->text3[2],
 		cx0 + tw + 12, 13, date_str);
 
 	/* Right: ONE status pill (wifi / volume / battery / power)
@@ -3950,31 +5216,31 @@ static void vile_shell_render_bar(struct vile_server *server) {
 	int pw = 12 + 18 + 10 + 18 + 10 + 22 +
 		(cap >= 0 ? 6 + bw : 0) + 10 + 16 + 12;
 	int px = W - 14 - pw;
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.08);
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.08);
 	cairo_new_path(cr);
 	vile_rounded_rect(cr, px + 0.5, 6.5, pw - 1, 27, 14);
 	cairo_fill(cr);
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.12);
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.12);
 	cairo_set_line_width(cr, 1);
 	cairo_new_path(cr);
 	vile_rounded_rect(cr, px + 0.5, 6.5, pw - 1, 27, 14);
 	cairo_stroke(cr);
 	double gx = px + 12 + 9;
-	vile_draw_wifi_glyph(cr, gx, cy, 9, 0.9, 0.9, 0.95);
+	vile_draw_wifi_glyph(cr, gx, cy, 9, P->glyph[0], P->glyph[1], P->glyph[2]);
 	gx += 9 + 10 + 9;
-	vile_draw_volume_glyph(cr, gx, cy, 9, 0.9, 0.9, 0.95);
+	vile_draw_volume_glyph(cr, gx, cy, 9, P->glyph[0], P->glyph[1], P->glyph[2]);
 	gx += 9 + 10 + 11;
 	vile_draw_battery_glyph(cr, gx - 11, cy - 6, 22, 12,
-		cap, 0.9, 0.9, 0.95);
+		cap, P->glyph[0], P->glyph[1], P->glyph[2]);
 	gx += 11;
 	if (cap >= 0) {
 		gx += 6;
-		vile_draw_text_at(cr, "Inter Bold 13", 0.93, 0.91, 0.98,
+		vile_draw_text_at(cr, "Inter Bold 13", P->text[0], P->text[1], P->text[2],
 			gx, 13, batt_pct);
 		gx += bw;
 	}
 	gx += 10 + 8;
-	vile_draw_power_glyph(cr, gx, cy, 8, 0.9, 0.9, 0.95);
+	vile_draw_power_glyph(cr, gx, cy, 8, P->glyph[0], P->glyph[1], P->glyph[2]);
 	server->shell_status_rect = (struct wlr_box){
 		.x = px, .y = bar_y, .width = pw, .height = H };
 
@@ -3992,228 +5258,283 @@ static void vile_shell_render_bar(struct vile_server *server) {
  * (vile_clock_scale) and the alpha text helper (vile_draw_text_centre_a,
  * only the clock's halo used it) went with the desktop clock. */
 
-static void vile_shell_render_dock(struct vile_server *server) {
-	/* The surface is bigger than the pill: a soft drop shadow and
-	 * a faint purple ambient glow live around it (the pill itself
-	 * is 296x80 at offset (40,20): four 56px icons). */
-	int W = VILE_DOCK_PAD * 2 + VILE_DOCK_ICON * 4 + VILE_DOCK_GAP * 3 + 80;
-	int H = VILE_DOCK_H + 60;
-	int px = 40, py = 20;
-	int pw = VILE_DOCK_PAD * 2 + VILE_DOCK_ICON * 4 + VILE_DOCK_GAP * 3;
-	int ph = VILE_DOCK_H;
-	cairo_surface_t *surf = cairo_image_surface_create(
-		CAIRO_FORMAT_ARGB32, W, H);
-	cairo_t *cr = cairo_create(surf);
-	/* Ambient purple glow under the pill. */
-	cairo_pattern_t *glow = cairo_pattern_create_radial(
-		W / 2.0, py + ph - 6, 10, W / 2.0, py + ph - 6, 110);
-	cairo_pattern_add_color_stop_rgba(glow, 0, 0.43, 0.29, 1.0, 0.20);
-	cairo_pattern_add_color_stop_rgba(glow, 1, 0.43, 0.29, 1.0, 0.0);
-	cairo_set_source(cr, glow);
-	cairo_rectangle(cr, 0, 0, W, H);
-	cairo_fill(cr);
-	cairo_pattern_destroy(glow);
-	/* Drop shadow under the pill. */
-	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35);
-	cairo_new_path(cr);
-	vile_rounded_rect(cr, px + 2, py + 6, pw, ph, 20);
-	cairo_fill(cr);
-	/* Floating pill: translucent dark, rounded, hairline edge. */
-	cairo_set_source_rgba(cr, 0.05, 0.035, 0.09, 0.72);
-	cairo_new_path(cr);
-	vile_rounded_rect(cr, px + 0.5, py + 0.5, pw - 1, ph - 1, 20);
-	cairo_fill(cr);
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.10);
-	cairo_set_line_width(cr, 1);
-	cairo_new_path(cr);
-	vile_rounded_rect(cr, px + 0.5, py + 0.5, pw - 1, ph - 1, 20);
-	cairo_stroke(cr);
-	/* Faint purple rim light along the pill's top edge. */
-	cairo_set_source_rgba(cr, 0.43, 0.29, 1.0, 0.35);
-	cairo_set_line_width(cr, 1.2);
-	cairo_new_path(cr);
-	cairo_move_to(cr, px + 22, py + 1.5);
-	cairo_line_to(cr, px + pw - 22, py + 1.5);
-	cairo_stroke(cr);
-
-	/* Foot icon: the clear v2 logo tile, 56px. Piece 7: scaled
-	 * around its cell centre by the hover/pop scale. */
-	double fx = px + VILE_DOCK_PAD, fy = py + (ph - VILE_DOCK_ICON) / 2.0;
-	double fsc = server->dock_rendered_scale[0];
-	if (server->shell_foot_icon) {
-		cairo_save(cr);
-		cairo_translate(cr, fx + VILE_DOCK_ICON / 2.0,
-			fy + VILE_DOCK_ICON / 2.0);
-		cairo_scale(cr, fsc, fsc);
-		cairo_translate(cr, -VILE_DOCK_ICON / 2.0,
-			-VILE_DOCK_ICON / 2.0);
-		cairo_scale(cr, (double)VILE_DOCK_ICON / 1024,
-			(double)VILE_DOCK_ICON / 1024);
-		cairo_set_source_surface(cr, server->shell_foot_icon, 0, 0);
-		cairo_paint(cr);
-		cairo_restore(cr);
-	} else {
-		vile_draw_text_centre(cr, "Inter Bold 20", 0.19, 0.60, 0.94,
-			fx + VILE_DOCK_ICON / 2.0, fy + VILE_DOCK_ICON / 2.0, ">_");
-	}
-	/* Settings icon: the real ribbon V on a dark tile — same
-	 * tile language as the foot logo, never the foot logo
-	 * itself. Piece 7: the whole tile scales around the cell
-	 * centre with the hover/pop scale. Fallback: the old
-	 * purple circle + V. */
-	double sx = px + VILE_DOCK_PAD + VILE_DOCK_ICON + VILE_DOCK_GAP;
-	double ssc = server->dock_rendered_scale[1];
+/* Draw one dock icon (app) into a cairo context, in a cell whose
+ * top-left is (x, y) in SURFACE coords, scaled around the cell
+ * centre by `scale`. Inside the transform the coords are local
+ * (0..56). Bare glyphs only — no tiles (transparent dock,
+ * Nov 10, 2026 ~16:31). */
+static void vile_dock_draw_icon(struct vile_server *server, cairo_t *cr,
+		int app, double x, double y, double scale) {
 	cairo_save(cr);
-	cairo_translate(cr, sx + VILE_DOCK_ICON / 2.0,
-		fy + VILE_DOCK_ICON / 2.0);
-	cairo_scale(cr, ssc, ssc);
+	cairo_translate(cr, x + VILE_DOCK_ICON / 2.0,
+		y + VILE_DOCK_ICON / 2.0);
+	cairo_scale(cr, scale, scale);
 	cairo_translate(cr, -VILE_DOCK_ICON / 2.0, -VILE_DOCK_ICON / 2.0);
-	if (server->shell_vile_icon) {
-		cairo_scale(cr, (double)VILE_DOCK_ICON / 1024,
-			(double)VILE_DOCK_ICON / 1024);
-		cairo_set_source_surface(cr, server->shell_vile_icon, 0, 0);
-		cairo_paint(cr);
-	} else {
-		cairo_set_source_rgb(cr, 0.43, 0.29, 1.0); /* #6D4AFF */
-		cairo_new_path(cr);
-		cairo_arc(cr, VILE_DOCK_ICON / 2.0, VILE_DOCK_ICON / 2.0,
-			26, 0, 2 * M_PI);
-		cairo_fill(cr);
-		vile_draw_text_centre(cr, "Inter Bold 30", 1.0, 1.0, 1.0,
-			VILE_DOCK_ICON / 2.0, VILE_DOCK_ICON / 2.0 + 1, "V");
-	}
-	cairo_restore(cr);
-
-	/* ScreenFit icon: a dark tile with a purple monitor glyph —
-	 * the same tile language as the foot logo, never the foot logo
-	 * itself. (ScreenFit = display / overscan settings.) Piece 7:
-	 * the whole tile + glyph scales around the cell centre. */
-	double tx = px + VILE_DOCK_PAD + VILE_DOCK_ICON + VILE_DOCK_GAP +
-		VILE_DOCK_ICON + VILE_DOCK_GAP;
-	double tsc = server->dock_rendered_scale[2];
-	cairo_save(cr);
-	cairo_translate(cr, tx + VILE_DOCK_ICON / 2.0,
-		fy + VILE_DOCK_ICON / 2.0);
-	cairo_scale(cr, tsc, tsc);
-	cairo_translate(cr, -VILE_DOCK_ICON / 2.0, -VILE_DOCK_ICON / 2.0);
-	/* NOTE: inside this transform the coords are LOCAL to the cell
-	 * (0..56) — the foot icon above draws its logo at (0,0) for
-	 * the same reason. The first Part A version drew with the
-	 * ABSOLUTE (tx, fy) coords here, which put the tile ~976px too
-	 * far right (off-screen) — the ScreenFit glyph was missing from
-	 * every anim-test shot while look-01 (pre-Part-A) had it. */
-	cairo_set_source_rgb(cr, 0.09, 0.07, 0.16); /* #171228 tile */
-	cairo_new_path(cr);
-	vile_rounded_rect(cr, 0, 0, VILE_DOCK_ICON, VILE_DOCK_ICON, 14);
-	cairo_fill(cr);
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.10);
-	cairo_set_line_width(cr, 1);
-	cairo_new_path(cr);
-	vile_rounded_rect(cr, 0.5, 0.5,
-		VILE_DOCK_ICON - 1, VILE_DOCK_ICON - 1, 14);
-	cairo_stroke(cr);
-	cairo_set_source_rgb(cr, 0.43, 0.29, 1.0); /* #6D4AFF */
-	cairo_set_line_width(cr, 3);
-	cairo_new_path(cr);
-	vile_rounded_rect(cr, 13, 13, 30, 21, 3);
-	cairo_stroke(cr);
-	cairo_move_to(cr, 28, 34);
-	cairo_line_to(cr, 28, 41);
-	cairo_stroke(cr);
-	cairo_move_to(cr, 20, 41);
-	cairo_line_to(cr, 36, 41);
-	cairo_stroke(cr);
-	cairo_restore(cr);
-
-	/* Files icon: the files-icon.png tile (512px), drawn like the
-	 * foot logo tile — same hover/pop scale around the cell centre.
-	 * Fallback when the asset is missing: a cairo folder outline,
-	 * so the dock never shows a blank cell. */
-	double ix = px + VILE_DOCK_PAD + VILE_DOCK_ICON + VILE_DOCK_GAP +
-		VILE_DOCK_ICON + VILE_DOCK_GAP +
-		VILE_DOCK_ICON + VILE_DOCK_GAP;
-	double isc = server->dock_rendered_scale[3];
-	cairo_save(cr);
-	cairo_translate(cr, ix + VILE_DOCK_ICON / 2.0,
-		fy + VILE_DOCK_ICON / 2.0);
-	cairo_scale(cr, isc, isc);
-	cairo_translate(cr, -VILE_DOCK_ICON / 2.0, -VILE_DOCK_ICON / 2.0);
-	if (server->shell_files_icon) {
-		cairo_scale(cr, (double)VILE_DOCK_ICON / 512,
-			(double)VILE_DOCK_ICON / 512);
-		cairo_set_source_surface(cr, server->shell_files_icon, 0, 0);
-		cairo_paint(cr);
-	} else {
-		/* Folder outline, local coords (0..56) like the ScreenFit
-		 * tile above: tab + body, purple stroke on a dark tile. */
-		cairo_set_source_rgb(cr, 0.09, 0.07, 0.16); /* #171228 */
-		cairo_new_path(cr);
-		vile_rounded_rect(cr, 0, 0, VILE_DOCK_ICON, VILE_DOCK_ICON, 14);
-		cairo_fill(cr);
+	switch (app) {
+	case DOCK_FOOT:
+		/* Bare footprint + ">_" + "foot" (foot-logo.png,
+		 * transparent). Fallback: the old ">_" text. */
+		if (server->shell_foot_icon) {
+			cairo_scale(cr, (double)VILE_DOCK_ICON / 1024,
+				(double)VILE_DOCK_ICON / 1024);
+			cairo_set_source_surface(cr, server->shell_foot_icon, 0, 0);
+			cairo_paint(cr);
+		} else {
+			vile_draw_text_centre(cr, "Inter Bold 20",
+				0.19, 0.60, 0.94,
+				VILE_DOCK_ICON / 2.0, VILE_DOCK_ICON / 2.0, ">_");
+		}
+		break;
+	case DOCK_SETTINGS:
+		/* Bare ribbon V (vile-logo.png, transparent) — the ribbon
+		 * stays as the Settings icon (bar corner only went).
+		 * Fallback: the old purple circle + V. */
+		if (server->shell_vile_icon) {
+			cairo_scale(cr, (double)VILE_DOCK_ICON / 1024,
+				(double)VILE_DOCK_ICON / 1024);
+			cairo_set_source_surface(cr, server->shell_vile_icon, 0, 0);
+			cairo_paint(cr);
+		} else {
+			cairo_set_source_rgb(cr, 0.43, 0.29, 1.0); /* #6D4AFF */
+			cairo_new_path(cr);
+			cairo_arc(cr, VILE_DOCK_ICON / 2.0,
+				VILE_DOCK_ICON / 2.0, 26, 0, 2 * M_PI);
+			cairo_fill(cr);
+			vile_draw_text_centre(cr, "Inter Bold 30", 1.0, 1.0, 1.0,
+				VILE_DOCK_ICON / 2.0,
+				VILE_DOCK_ICON / 2.0 + 1, "V");
+		}
+		break;
+	case DOCK_SCREENFIT:
+		/* Monitor glyph, no tile (ScreenFit = display / overscan). */
 		cairo_set_source_rgb(cr, 0.43, 0.29, 1.0); /* #6D4AFF */
 		cairo_set_line_width(cr, 3);
 		cairo_new_path(cr);
-		cairo_move_to(cr, 12, 20);
-		cairo_line_to(cr, 12, 16);
-		cairo_line_to(cr, 24, 16);
-		cairo_line_to(cr, 28, 20);
-		cairo_line_to(cr, 44, 20);
-		cairo_line_to(cr, 44, 42);
-		cairo_line_to(cr, 12, 42);
-		cairo_close_path(cr);
+		vile_rounded_rect(cr, 13, 13, 30, 21, 3);
 		cairo_stroke(cr);
+		cairo_move_to(cr, 28, 34);
+		cairo_line_to(cr, 28, 41);
+		cairo_stroke(cr);
+		cairo_move_to(cr, 20, 41);
+		cairo_line_to(cr, 36, 41);
+		cairo_stroke(cr);
+		break;
+	case DOCK_FILES:
+		/* Bare folder + page (files-icon-bare.png, transparent).
+		 * Fallback: a cairo folder outline, no tile. */
+		if (server->shell_files_icon) {
+			cairo_scale(cr, (double)VILE_DOCK_ICON / 512,
+				(double)VILE_DOCK_ICON / 512);
+			cairo_set_source_surface(cr, server->shell_files_icon, 0, 0);
+			cairo_paint(cr);
+		} else {
+			cairo_set_source_rgb(cr, 0.43, 0.29, 1.0);
+			cairo_set_line_width(cr, 3);
+			cairo_new_path(cr);
+			cairo_move_to(cr, 12, 20);
+			cairo_line_to(cr, 12, 16);
+			cairo_line_to(cr, 24, 16);
+			cairo_line_to(cr, 28, 20);
+			cairo_line_to(cr, 44, 20);
+			cairo_line_to(cr, 44, 42);
+			cairo_line_to(cr, 12, 42);
+			cairo_close_path(cr);
+			cairo_stroke(cr);
+		}
+		break;
+	case DOCK_SETUP:
+		/* Gear, no tile — distinct from the Settings ribbon V.
+		 * 8 teeth + outer ring + hub. */
+		cairo_set_source_rgb(cr, 0.43, 0.29, 1.0); /* #6D4AFF */
+		cairo_set_line_width(cr, 3);
+		for (int t = 0; t < 8; t++) {
+			double a = t * M_PI / 4.0;
+			double c = cos(a), s = sin(a);
+			cairo_move_to(cr, 28 + 19 * c, 28 + 19 * s);
+			cairo_line_to(cr, 28 + 26 * c, 28 + 26 * s);
+		}
+		cairo_stroke(cr);
+		cairo_new_path(cr);
+		cairo_arc(cr, 28, 28, 15, 0, 2 * M_PI);
+		cairo_stroke(cr);
+		cairo_new_path(cr);
+		cairo_arc(cr, 28, 28, 6, 0, 2 * M_PI);
+		cairo_stroke(cr);
+		break;
+	default:
+		break;
 	}
 	cairo_restore(cr);
+}
 
-	/* Purple dots under running apps, each with its own halo. */
-	double dot_y = py + ph - 7;
-	if (server->shell_dock_foot_n > 0) {
-		cairo_set_source_rgba(cr, 0.43, 0.29, 1.0, 0.30);
+static void vile_shell_render_dock(struct vile_server *server) {
+	/* Frosted dock (Nov 10, 2026 ~19:52 — Adnan, macOS-style:
+	 * a clean, slightly translucent frosted pill — you can
+	 * faintly see the wallpaper through it, but not too much,
+	 * and NOT too black. Dock design v3: 0.5.3 dark solid pill
+	 * -> 0.5.4 bare/transparent -> 0.5.5 frosted. The surface
+	 * keeps the old size/margins (40px sides, 20px top) so the
+	 * node position math in vile_dock_layout is unchanged. The
+	 * pill is painted first (frost + tint + hairline); the
+	 * icons, running dots, and reorder indicator go on top.
+	 * Input is untouched by the frost: hit-testing uses
+	 * shell_dock_rect, which is exactly the pill rect. */
+	int n = server->dock_n;
+	int W = VILE_DOCK_PAD * 2 + VILE_DOCK_ICON * n
+		+ VILE_DOCK_GAP * (n > 0 ? n - 1 : 0) + 80;
+	int H = VILE_DOCK_H + 60;
+	int px = 40, py = 20;
+	int dock_w = W - 80;
+	cairo_surface_t *surf = cairo_image_surface_create(
+		CAIRO_FORMAT_ARGB32, W, H);
+	cairo_t *cr = cairo_create(surf);
+	/* The surface starts fully transparent outside the pill. */
+	const struct vile_palette *P = vile_pal(server->theme_light);
+	/* Frost cache: rebuild only when the wallpaper or the dock
+	 * rect changes (never per hover frame — the blur loads and
+	 * decodes the whole wallpaper). */
+	const char *wpath = vile_wallpaper_path();
+	struct stat st;
+	time_t mtime = 0;
+	if (wpath && stat(wpath, &st) == 0) {
+		mtime = st.st_mtime;
+	}
+	if (!server->shell_dock_frost || !wpath ||
+			strcmp(wpath, server->shell_dock_frost_path) != 0 ||
+			mtime != server->shell_dock_frost_mtime ||
+			server->shell_dock_x != server->shell_dock_frost_x ||
+			server->shell_dock_y != server->shell_dock_frost_y ||
+			dock_w != server->shell_dock_frost_w ||
+			VILE_DOCK_H != server->shell_dock_frost_h) {
+		cairo_surface_t *frost = vile_shell_build_dock_frost(server,
+			server->shell_dock_x, server->shell_dock_y,
+			dock_w, VILE_DOCK_H);
+		if (frost) {
+			if (server->shell_dock_frost) {
+				cairo_surface_destroy(server->shell_dock_frost);
+			}
+			server->shell_dock_frost = frost;
+			snprintf(server->shell_dock_frost_path,
+				sizeof(server->shell_dock_frost_path),
+				"%s", wpath ? wpath : "");
+			server->shell_dock_frost_mtime = mtime;
+			server->shell_dock_frost_x = server->shell_dock_x;
+			server->shell_dock_frost_y = server->shell_dock_y;
+			server->shell_dock_frost_w = dock_w;
+			server->shell_dock_frost_h = VILE_DOCK_H;
+		}
+	}
+	/* Frosted pill: blurred wallpaper through a rounded rect,
+	 * translucent tint on top, hairline edge. Lighter and more
+	 * see-through than the bar (whose tint is 0.55): dark theme
+	 * is a translucent dark GREY, not near-black; light theme
+	 * is a translucent lavender-white. */
+	cairo_new_path(cr);
+	vile_rounded_rect(cr, px + 0.5, py + 0.5,
+		dock_w - 1, VILE_DOCK_H - 1, 18);
+	cairo_clip(cr);
+	if (server->shell_dock_frost) {
+		cairo_set_source_surface(cr, server->shell_dock_frost,
+			px, py);
+		cairo_paint(cr);
+	}
+	if (server->theme_light) {
+		cairo_set_source_rgba(cr, 0.988, 0.980, 1.0, 0.55);
+	} else {
+		cairo_set_source_rgba(cr, 0.16, 0.15, 0.20, 0.38);
+	}
+	cairo_rectangle(cr, px, py, dock_w, VILE_DOCK_H);
+	cairo_fill(cr);
+	cairo_reset_clip(cr);
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.15);
+	cairo_set_line_width(cr, 1);
+	cairo_new_path(cr);
+	vile_rounded_rect(cr, px + 0.5, py + 0.5,
+		dock_w - 1, VILE_DOCK_H - 1, 18);
+	cairo_stroke(cr);
+	double dot_y = py + VILE_DOCK_H - 7;
+	/* Insertion indicator for a reorder drag: a thin purple bar
+	 * at the left edge of the drop slot's cell. */
+	if (server->dock_reorder && server->dock_drag_slot >= 0) {
+		int to = vile_dock_drop_slot(server, server->dock_drag_x);
+		double ix = px + VILE_DOCK_PAD
+			+ to * (VILE_DOCK_ICON + VILE_DOCK_GAP)
+			- VILE_DOCK_GAP / 2.0;
+		cairo_set_source_rgba(cr, 0.43, 0.29, 1.0, 0.9);
 		cairo_new_path(cr);
-		cairo_arc(cr, fx + VILE_DOCK_ICON / 2.0, dot_y, 7,
-			0, 2 * M_PI);
-		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 0.43, 0.29, 1.0);
-		cairo_new_path(cr);
-		cairo_arc(cr, fx + VILE_DOCK_ICON / 2.0, dot_y, 3.5,
-			0, 2 * M_PI);
+		vile_rounded_rect(cr, ix - 2, py + VILE_DOCK_PAD, 4,
+			VILE_DOCK_ICON, 2);
 		cairo_fill(cr);
 	}
-	if (server->shell_dock_set_n > 0) {
-		cairo_set_source_rgba(cr, 0.43, 0.29, 1.0, 0.30);
-		cairo_new_path(cr);
-		cairo_arc(cr, sx + VILE_DOCK_ICON / 2.0, dot_y, 7,
-			0, 2 * M_PI);
-		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 0.43, 0.29, 1.0);
-		cairo_new_path(cr);
-		cairo_arc(cr, sx + VILE_DOCK_ICON / 2.0, dot_y, 3.5,
-			0, 2 * M_PI);
-		cairo_fill(cr);
+	/* Icons (and their running dots), in slot order. The dragged
+	 * icon is drawn last, at the pointer, lifted and slightly
+	 * larger — it floats above the others. */
+	for (int i = 0; i < n; i++) {
+		if (server->dock_reorder && i == server->dock_drag_slot) {
+			continue;
+		}
+		int app = server->dock_order[i];
+		double x = px + VILE_DOCK_PAD
+			+ i * (VILE_DOCK_ICON + VILE_DOCK_GAP);
+		double y = py + VILE_DOCK_PAD;
+		/* Launch jump (0.5.6 — KDE Plasma style): while this
+		 * app is launching, its icon rises and falls — one
+		 * bounce every 500ms, 14px peak, sine-shaped so it
+		 * starts and ends at rest. The pill's 20px top margin
+		 * fits the rise (icon top reaches y=18 at peak). */
+		bool launching = server->dock_launch_ms[app] != 0;
+		if (launching) {
+			int64_t el = vile_anim_now_ms()
+				- server->dock_launch_ms[app];
+			int jmp = vile_launch_jump_ms();
+			double ph = fmod((double)(el % jmp),
+				(double)jmp) / (double)jmp;
+			y -= 14.0 * sin(M_PI * ph);
+		}
+		vile_dock_draw_icon(server, cr, app, x, y,
+			server->dock_rendered_scale[i]);
+		/* Spinner overlay on the bouncing icon: the circle-spin
+		 * loader frame as a purple mask (reads in both themes —
+		 * the raw white frames would vanish on the light dock).
+		 * 30fps, 28px, centred on the (jumped) icon. */
+		if (launching && server->shell_spin_n > 0) {
+			int64_t el = vile_anim_now_ms()
+				- server->dock_launch_ms[app];
+			int fi = (int)((el / 33) % server->shell_spin_n);
+			cairo_surface_t *fr = server->shell_spin_frames[fi];
+			int fw = cairo_image_surface_get_width(fr);
+			int fh = cairo_image_surface_get_height(fr);
+			cairo_save(cr);
+			cairo_translate(cr,
+				x + (VILE_DOCK_ICON - 28.0) / 2.0,
+				y + (VILE_DOCK_ICON - 28.0) / 2.0);
+			cairo_scale(cr, 28.0 / fw, 28.0 / fh);
+			cairo_set_source_rgb(cr, 0.43, 0.29, 1.0);
+			cairo_mask_surface(cr, fr, 0, 0);
+			cairo_restore(cr);
+		}
+		if (vile_dock_running_count(server, app) > 0) {
+			double cx = x + VILE_DOCK_ICON / 2.0;
+			cairo_set_source_rgba(cr, 0.43, 0.29, 1.0, 0.30);
+			cairo_new_path(cr);
+			cairo_arc(cr, cx, dot_y, 7, 0, 2 * M_PI);
+			cairo_fill(cr);
+			cairo_set_source_rgb(cr, 0.43, 0.29, 1.0);
+			cairo_new_path(cr);
+			cairo_arc(cr, cx, dot_y, 3.5, 0, 2 * M_PI);
+			cairo_fill(cr);
+		}
 	}
-	if (server->shell_dock_screenfit_n > 0) {
-		cairo_set_source_rgba(cr, 0.43, 0.29, 1.0, 0.30);
-		cairo_new_path(cr);
-		cairo_arc(cr, tx + VILE_DOCK_ICON / 2.0, dot_y, 7,
-			0, 2 * M_PI);
-		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 0.43, 0.29, 1.0);
-		cairo_new_path(cr);
-		cairo_arc(cr, tx + VILE_DOCK_ICON / 2.0, dot_y, 3.5,
-			0, 2 * M_PI);
-		cairo_fill(cr);
-	}
-	if (server->shell_dock_files_n > 0) {
-		cairo_set_source_rgba(cr, 0.43, 0.29, 1.0, 0.30);
-		cairo_new_path(cr);
-		cairo_arc(cr, ix + VILE_DOCK_ICON / 2.0, dot_y, 7,
-			0, 2 * M_PI);
-		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 0.43, 0.29, 1.0);
-		cairo_new_path(cr);
-		cairo_arc(cr, ix + VILE_DOCK_ICON / 2.0, dot_y, 3.5,
-			0, 2 * M_PI);
-		cairo_fill(cr);
+	if (server->dock_reorder && server->dock_drag_slot >= 0) {
+		/* The dragged icon follows the pointer (surface coords:
+		 * the surface starts at dock_x - 40, so subtract that),
+		 * lifted 10px and scaled 1.15. */
+		double sx = server->dock_drag_x - (server->shell_dock_x - 40)
+			- VILE_DOCK_ICON / 2.0;
+		double sy = py + VILE_DOCK_PAD - 10;
+		vile_dock_draw_icon(server, cr,
+			server->dock_order[server->dock_drag_slot],
+			sx, sy, 1.15);
 	}
 	cairo_destroy(cr);
 	/* Piece 7: remember the buffer size — the startup dock pop
@@ -4227,6 +5548,7 @@ static void vile_shell_render_dock(struct vile_server *server) {
 
 static void vile_shell_render_menu(struct vile_server *server) {
 	int W = VILE_MENU_W, H = VILE_MENU_H;
+	const struct vile_palette *P = vile_pal(server->theme_light);
 	cairo_surface_t *surf = cairo_image_surface_create(
 		CAIRO_FORMAT_ARGB32, W, H);
 	cairo_t *cr = cairo_create(surf);
@@ -4242,7 +5564,7 @@ static void vile_shell_render_menu(struct vile_server *server) {
 	 * window behind the menu would need scene-graph blur, which
 	 * wlroots does not offer here — the near-opaque tint is the
 	 * honest version. */
-	cairo_set_source_rgba(cr, 0.05, 0.035, 0.09, 0.97);
+	cairo_set_source_rgba(cr, P->panel_rgb[0], P->panel_rgb[1], P->panel_rgb[2], 0.97);
 	cairo_new_path(cr);
 	vile_rounded_rect(cr, 0.5, 0.5, W - 1, H - 1, 16);
 	cairo_fill(cr);
@@ -4266,7 +5588,7 @@ static void vile_shell_render_menu(struct vile_server *server) {
 	cairo_pattern_destroy(bsh);
 	cairo_reset_clip(cr);
 	/* Hairline edge + purple bottom hairline. */
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.12);
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.12);
 	cairo_set_line_width(cr, 1);
 	cairo_new_path(cr);
 	vile_rounded_rect(cr, 0.5, 0.5, W - 1, H - 1, 16);
@@ -4278,21 +5600,21 @@ static void vile_shell_render_menu(struct vile_server *server) {
 	cairo_line_to(cr, W - 18, H - 1.5);
 	cairo_stroke(cr);
 
-	vile_draw_text_at(cr, "Inter Bold 12", 0.55, 0.52, 0.62,
+	vile_draw_text_at(cr, "Inter Bold 12", P->muted[0], P->muted[1], P->muted[2],
 		20, 16, "SYSTEM");
 
 	/* Wi-Fi row (real status from /sys). */
 	char wifi[64], batt[64];
 	vile_shell_wifi_status(wifi, sizeof(wifi));
 	vile_shell_battery_status(batt, sizeof(batt));
-	vile_draw_text_at(cr, "Inter 18", 0.93, 0.91, 0.98, 20, 54, "Wi-Fi");
-	vile_shell_draw_text_right(cr, "Inter 16", 0.72, 0.69, 0.82,
+	vile_draw_text_at(cr, "Inter 18", P->text[0], P->text[1], P->text[2], 20, 54, "Wi-Fi");
+	vile_shell_draw_text_right(cr, "Inter 16", P->text2[0], P->text2[1], P->text2[2],
 		W - 20, 56, wifi);
 	/* Volume row: the slider is VISUAL ONLY for now (no audio
 	 * control is wired in the compositor) — it does not claim a
 	 * real level. */
-	vile_draw_text_at(cr, "Inter 18", 0.93, 0.91, 0.98, 20, 94, "Volume");
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.15);
+	vile_draw_text_at(cr, "Inter 18", P->text[0], P->text[1], P->text[2], 20, 94, "Volume");
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.15);
 	cairo_new_path(cr);
 	vile_rounded_rect(cr, 150, 101, 130, 6, 3);
 	cairo_fill(cr);
@@ -4300,24 +5622,28 @@ static void vile_shell_render_menu(struct vile_server *server) {
 	cairo_new_path(cr);
 	vile_rounded_rect(cr, 150, 101, 130 * 0.6, 6, 3);
 	cairo_fill(cr);
-	cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+	cairo_set_source_rgb(cr, P->white[0], P->white[1], P->white[2]);
 	cairo_new_path(cr);
 	cairo_arc(cr, 150 + 130 * 0.6, 104, 7, 0, 2 * M_PI);
 	cairo_fill(cr);
 	/* Battery row (real status from /sys). */
-	vile_draw_text_at(cr, "Inter 18", 0.93, 0.91, 0.98, 20, 134, "Battery");
-	vile_shell_draw_text_right(cr, "Inter 16", 0.72, 0.69, 0.82,
+	vile_draw_text_at(cr, "Inter 18", P->text[0], P->text[1], P->text[2], 20, 134, "Battery");
+	vile_shell_draw_text_right(cr, "Inter 16", P->text2[0], P->text2[1], P->text2[2],
 		W - 20, 136, batt);
 
 	/* Separator, then the actions that actually do something. */
-	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.10);
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.10);
 	cairo_rectangle(cr, 20, 172, W - 40, 1);
 	cairo_fill(cr);
-	vile_draw_lock_glyph(cr, 20, 190, 20, 0.93, 0.91, 0.98);
-	vile_draw_text_at(cr, "Inter 18", 0.93, 0.91, 0.98, 48, 190, "Lock");
-	vile_draw_text_at(cr, "Inter 18", 0.93, 0.91, 0.98, 20, 230, "Settings");
-	vile_draw_power_glyph(cr, 30, 280, 8, 0.93, 0.91, 0.98);
-	vile_draw_text_at(cr, "Inter 18", 0.93, 0.91, 0.98, 48, 270, "Power Off");
+	vile_draw_lock_glyph(cr, 20, 190, 20, P->text[0], P->text[1], P->text[2]);
+	vile_draw_text_at(cr, "Inter 18", P->text[0], P->text[1], P->text[2], 48, 190, "Lock");
+	vile_draw_text_at(cr, "Inter 18", P->text[0], P->text[1], P->text[2], 20, 230, "Settings");
+	/* Log Out (0.5.4 post-theme fixes — session switching: back
+	 * to the LightDM greeter, or to the text console when Vile
+	 * was started from one). Text-only row, like Settings. */
+	vile_draw_text_at(cr, "Inter 18", P->text[0], P->text[1], P->text[2], 20, 270, "Log Out");
+	vile_draw_power_glyph(cr, 30, 320, 8, P->text[0], P->text[1], P->text[2]);
+	vile_draw_text_at(cr, "Inter 18", P->text[0], P->text[1], P->text[2], 48, 310, "Power Off");
 
 	cairo_destroy(cr);
 	vile_shell_set_buffer(server, server->shell_menu_node,
@@ -4368,8 +5694,39 @@ static void vile_shell_update(struct vile_server *server) {
 			 * a wallpaper change must re-render the bar (and
 			 * its frost) now, not at the next minute tick. */
 			vile_shell_render_bar(server);
+			/* Frosted dock: same — the dock pill samples the
+			 * wallpaper, so re-render it now or the frost
+			 * stays the old wallpaper's until the next dock
+			 * event (hover/reorder). */
+			vile_shell_render_dock(server);
 		}
 	}
+	/* Theme watcher (0.5.4): same pattern as the wallpaper hook —
+	 * Settings and the Setup wizard write ~/.config/vile/theme,
+	 * the compositor applies it live within a second. VILE_THEME
+	 * (test override) wins, so a forced launch ignores the file. */
+	if (!getenv("VILE_THEME") || !*getenv("VILE_THEME")) {
+		char theme_path[1024];
+		if (vile_theme_path(theme_path, sizeof(theme_path))) {
+			struct stat st;
+			if (stat(theme_path, &st) == 0) {
+				if (st.st_mtime != server->theme_mtime) {
+					server->theme_mtime = st.st_mtime;
+					vile_apply_theme(server,
+						vile_read_theme());
+				}
+			} else if (server->theme_mtime != 0) {
+				/* Theme file deleted: back to dark. */
+				server->theme_mtime = 0;
+				vile_apply_theme(server, vile_read_theme());
+			}
+		}
+	}
+	/* Dock refresh (Nov 10, 2026 ~16:31): the Setup icon's
+	 * lifecycle — the wizard writes setup-done, and the icon
+	 * must disappear by itself within a second. Returns true
+	 * when the order changed (it re-renders the dock itself). */
+	vile_dock_refresh(server);
 	int foot_n = 0, set_n = 0, screenfit_n = 0, files_n = 0;
 	struct vile_toplevel *t;
 	wl_list_for_each(t, &server->toplevels, link) {
@@ -4417,11 +5774,10 @@ static void vile_shell_fit(struct vile_server *server, int out_w, int out_h) {
 	}
 	server->shell_w = out_w;
 	server->shell_h = out_h;
-	int dock_w = VILE_DOCK_PAD * 2 + VILE_DOCK_ICON * 4 + VILE_DOCK_GAP * 3;
-	server->shell_dock_x = (out_w - dock_w) / 2;
-	/* Bottom-bar layout: the dock pill sits 12px above the 40px
-	 * bottom bar (dock bottom = bar top - 12). */
-	server->shell_dock_y = out_h - VILE_BAR_H - VILE_TILE_GAP - VILE_DOCK_H;
+	/* Dock geometry (centred, width from dock_n): vile_dock_layout
+	 * sets dock_x/dock_y, the dock rect, the per-slot rects, and
+	 * the dock node position. */
+	vile_dock_layout(server);
 	/* The menu rises UP from the bottom bar: its bottom edge sits
 	 * 8px above the bar top, flush right, never clipped. */
 	server->shell_menu_x = out_w - VILE_MENU_W;
@@ -4430,39 +5786,10 @@ static void vile_shell_fit(struct vile_server *server, int out_w, int out_h) {
 		wlr_scene_node_set_position(&server->shell_bar_node->node,
 			0, out_h - VILE_BAR_H);
 	}
-	if (server->shell_dock_node) {
-		/* The dock surface is bigger than the pill (glow + shadow
-		 * around it), so the node sits 40px left and 20px above
-		 * the pill rect. */
-		wlr_scene_node_set_position(&server->shell_dock_node->node,
-			server->shell_dock_x - 40, server->shell_dock_y - 20);
-	}
 	if (server->shell_menu_node) {
 		wlr_scene_node_set_position(&server->shell_menu_node->node,
 			server->shell_menu_x, server->shell_menu_y);
 	}
-	server->shell_dock_rect = (struct wlr_box){
-		.x = server->shell_dock_x, .y = server->shell_dock_y,
-		.width = dock_w, .height = VILE_DOCK_H };
-	server->shell_dock_foot_rect = (struct wlr_box){
-		.x = server->shell_dock_x + VILE_DOCK_PAD,
-		.y = server->shell_dock_y + (VILE_DOCK_H - VILE_DOCK_ICON) / 2,
-		.width = VILE_DOCK_ICON, .height = VILE_DOCK_ICON };
-	server->shell_dock_settings_rect = (struct wlr_box){
-		.x = server->shell_dock_x + VILE_DOCK_PAD + VILE_DOCK_ICON + VILE_DOCK_GAP,
-		.y = server->shell_dock_y + (VILE_DOCK_H - VILE_DOCK_ICON) / 2,
-		.width = VILE_DOCK_ICON, .height = VILE_DOCK_ICON };
-	server->shell_dock_screenfit_rect = (struct wlr_box){
-		.x = server->shell_dock_x + VILE_DOCK_PAD + VILE_DOCK_ICON + VILE_DOCK_GAP +
-			VILE_DOCK_ICON + VILE_DOCK_GAP,
-		.y = server->shell_dock_y + (VILE_DOCK_H - VILE_DOCK_ICON) / 2,
-		.width = VILE_DOCK_ICON, .height = VILE_DOCK_ICON };
-	server->shell_dock_files_rect = (struct wlr_box){
-		.x = server->shell_dock_x + VILE_DOCK_PAD + VILE_DOCK_ICON + VILE_DOCK_GAP +
-			VILE_DOCK_ICON + VILE_DOCK_GAP +
-			VILE_DOCK_ICON + VILE_DOCK_GAP,
-		.y = server->shell_dock_y + (VILE_DOCK_H - VILE_DOCK_ICON) / 2,
-		.width = VILE_DOCK_ICON, .height = VILE_DOCK_ICON };
 	server->shell_menu_rect = (struct wlr_box){
 		.x = server->shell_menu_x, .y = server->shell_menu_y,
 		.width = VILE_MENU_W, .height = VILE_MENU_H };
@@ -4473,6 +5800,9 @@ static void vile_shell_fit(struct vile_server *server, int out_w, int out_h) {
 		.x = server->shell_menu_x, .y = server->shell_menu_y + 220,
 		.width = VILE_MENU_W, .height = 40 };
 	server->shell_menu_power_rect = (struct wlr_box){
+		.x = server->shell_menu_x, .y = server->shell_menu_y + 300,
+		.width = VILE_MENU_W, .height = 40 };
+	server->shell_menu_logout_rect = (struct wlr_box){
 		.x = server->shell_menu_x, .y = server->shell_menu_y + 260,
 		.width = VILE_MENU_W, .height = 40 };
 	/* Bar Redesign: the bar surface is full output width, so an
@@ -4495,13 +5825,26 @@ static void vile_shell_create(struct vile_server *server, int out_w, int out_h) 
 	server->dock_pop_icon = -1;
 	server->menu_dy = 16.0f;
 	server->menu_op = 0.0f;
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < VILE_DOCK_MAX; i++) {
 		server->dock_icon_scale[i] = 1.0f;
 		server->dock_rendered_scale[i] = 1.0f;
 		server->dock_icon_from[i] = 1.0f;
 		server->dock_icon_to[i] = 1.0f;
 		server->dock_icon_ms[i] = 0;
 	}
+	/* Dock state (Nov 10, 2026 ~16:31): no press armed, no
+	 * reorder live, unpin menu closed. The pinned order is loaded
+	 * from ~/.config/vile/dock-pinned (defaults when missing) —
+	 * BEFORE fit, so the geometry comes from the loaded order. */
+	server->dock_press_slot = -1;
+	server->dock_press_down = false;
+	server->dock_press_moved = false;
+	server->dock_reorder = false;
+	server->dock_drag_slot = -1;
+	server->dock_drag_x = 0;
+	server->shell_unpin_open = false;
+	server->shell_unpin_slot = -1;
+	vile_dock_load(server);
 	/* Shell tree: bar + dock + menu, above the windows. (The
 	 * desktop clock used to have its own tree below the windows —
 	 * it was removed Nov 10, 2026 with the clock itself.) */
@@ -4516,12 +5859,23 @@ static void vile_shell_create(struct vile_server *server, int out_w, int out_h) 
 		wlr_scene_buffer_create(server->shell_tree, NULL);
 	server->shell_menu_node =
 		wlr_scene_buffer_create(server->shell_tree, NULL);
+	server->shell_unpin_node =
+		wlr_scene_buffer_create(server->shell_tree, NULL);
+	if (server->shell_unpin_node) {
+		wlr_scene_node_set_enabled(&server->shell_unpin_node->node,
+			false);
+	}
 	if (server->shell_menu_node) {
 		wlr_scene_node_set_enabled(&server->shell_menu_node->node,
 			false);
 	}
-	/* Foot icon for the dock: the clear v2 logo tile. */
+	/* Foot icon for the dock: the BARE footprint (foot-logo.png,
+	 * transparent, no tile) — the transparent dock shows bare
+	 * glyphs. Fallback to the old dark tile if the bare file is
+	 * missing (it still reads fine without a pill behind it). */
 	const char *icon_paths[] = {
+		"../assets/foot-logo.png",
+		"assets/foot-logo.png",
 		"../assets/foot-logo-dark.png",
 		"assets/foot-logo-dark.png",
 		NULL,
@@ -4540,12 +5894,15 @@ static void vile_shell_create(struct vile_server *server, int out_w, int out_h) 
 	}
 	if (!server->shell_foot_icon) {
 		wlr_log(WLR_ERROR,
-			"Vile: shell: foot-logo-dark.png not found — dock falls back to text");
+			"Vile: shell: foot-logo.png not found — dock falls back to text");
 	}
-	/* Files icon for the dock: the files-icon.png tile (512px,
-	 * dark tile, purple folder). Same candidate paths as the foot
-	 * logo — compositor dir on this VM and the ISO layout. */
+	/* Files icon for the dock: the BARE folder + page
+	 * (files-icon-bare.png, 512px, transparent). Fallback to the
+	 * old tile. Same candidate paths as the foot logo —
+	 * compositor dir on this VM and the ISO layout. */
 	const char *files_icon_paths[] = {
+		"../assets/files-icon-bare.png",
+		"assets/files-icon-bare.png",
 		"../assets/files-icon.png",
 		"assets/files-icon.png",
 		NULL,
@@ -4566,10 +5923,13 @@ static void vile_shell_create(struct vile_server *server, int out_w, int out_h) 
 		wlr_log(WLR_ERROR,
 			"Vile: shell: files-icon.png not found — dock falls back to a drawn folder");
 	}
-	/* Vile logo for the bar tile + dock Settings icon: the real
-	 * ribbon V on a dark #171228 tile (vile-logo-dark.png).
-	 * Same candidate paths as the other dock icons. */
+	/* Vile logo for the dock Settings icon: the BARE ribbon V
+	 * (vile-logo.png, transparent) — the ribbon stays as the
+	 * Settings icon (only the bar corner went). Fallback to the
+	 * dark tile. Same candidate paths as the other dock icons. */
 	const char *vile_icon_paths[] = {
+		"../assets/vile-logo.png",
+		"assets/vile-logo.png",
 		"../assets/vile-logo-dark.png",
 		"assets/vile-logo-dark.png",
 		NULL,
@@ -4588,7 +5948,7 @@ static void vile_shell_create(struct vile_server *server, int out_w, int out_h) 
 	}
 	if (!server->shell_vile_icon) {
 		wlr_log(WLR_ERROR,
-			"Vile: shell: vile-logo-dark.png not found — bar/dock fall back to the drawn V");
+			"Vile: shell: vile-logo.png not found — dock falls back to the drawn V");
 	}
 	vile_shell_fit(server, out_w, out_h);
 	/* Render the dock once here: vile_shell_update() only re-renders
@@ -4596,25 +5956,8 @@ static void vile_shell_create(struct vile_server *server, int out_w, int out_h) 
 	 * already empty (0 == 0), so without this the dock node never
 	 * gets a buffer and the bare desktop has no dock at all. */
 	vile_shell_render_dock(server);
-	wlr_log(WLR_INFO,
-		"Vile: shell created: bar %dx%d, dock foot icon centre (%d,%d), settings centre (%d,%d), screenfit centre (%d,%d), files centre (%d,%d)",
-		out_w, VILE_BAR_H,
-		server->shell_dock_foot_rect.x +
-			server->shell_dock_foot_rect.width / 2,
-		server->shell_dock_foot_rect.y +
-			server->shell_dock_foot_rect.height / 2,
-		server->shell_dock_settings_rect.x +
-			server->shell_dock_settings_rect.width / 2,
-		server->shell_dock_settings_rect.y +
-			server->shell_dock_settings_rect.height / 2,
-		server->shell_dock_screenfit_rect.x +
-			server->shell_dock_screenfit_rect.width / 2,
-		server->shell_dock_screenfit_rect.y +
-			server->shell_dock_screenfit_rect.height / 2,
-		server->shell_dock_files_rect.x +
-			server->shell_dock_files_rect.width / 2,
-		server->shell_dock_files_rect.y +
-			server->shell_dock_files_rect.height / 2);
+	wlr_log(WLR_INFO, "Vile: shell created: bar %dx%d", out_w, VILE_BAR_H);
+	vile_dock_log_centres(server);
 }
 
 static void vile_shell_set_menu(struct vile_server *server, bool open) {
@@ -4802,7 +6145,11 @@ static struct vile_toplevel *vile_shell_find_app(struct vile_server *server,
 	struct vile_toplevel *first = NULL, *t;
 	wl_list_for_each(t, &server->toplevels, link) {
 		const char *title = t->xdg_toplevel->title;
-		if (!title || strncmp(title, prefix, n) != 0) {
+		/* Case-insensitive: dock ids are lowercase ("settings")
+		 * but window titles are capitalised ("Settings") — a
+		 * case-sensitive match never finds Settings/ScreenFit
+		 * and a second dock click spawns a duplicate window. */
+		if (!title || strncasecmp(title, prefix, n) != 0) {
 			continue;
 		}
 		if (!first) {
@@ -4834,9 +6181,129 @@ static struct vile_toplevel *vile_shell_find_files(struct vile_server *server) {
 	return first;
 }
 
-static void vile_shell_dock_activate(struct vile_server *server,
-		const char *prefix) {
-	if (strcmp(prefix, "Files") == 0) {
+/* Launch jump (0.5.6 — KDE Plasma style): a dock click that spawns
+ * an app starts its icon bouncing until the app's window maps (or
+ * the 5s timeout). Per-app start times, so two apps can bounce at
+ * once. Focusing an already-open app does NOT jump. */
+
+/* Circle-spin loader frames (assets/loaders/circle-spin/, 53
+ * transparent PNGs, 30fps) — drawn as a purple mask on a bouncing
+ * icon while its app loads. Loaded once, lazily, on the first dock
+ * launch; the dock falls back to the bare bounce if they are
+ * missing. */
+static void vile_shell_load_spin_frames(struct vile_server *server) {
+	if (server->shell_spin_n > 0) {
+		return;
+	}
+	const char *paths[] = {
+		"../assets/loaders/circle-spin/frame-%03d.png",
+		"assets/loaders/circle-spin/frame-%03d.png",
+		NULL,
+	};
+	for (int i = 0; i < VILE_SPIN_MAX; i++) {
+		cairo_surface_t *img = NULL;
+		for (int p = 0; paths[p]; p++) {
+			char buf[256];
+			snprintf(buf, sizeof(buf), paths[p], i);
+			img = cairo_image_surface_create_from_png(buf);
+			if (cairo_surface_status(img)
+					== CAIRO_STATUS_SUCCESS) {
+				break;
+			}
+			cairo_surface_destroy(img);
+			img = NULL;
+		}
+		if (!img) {
+			break;
+		}
+		server->shell_spin_frames[server->shell_spin_n++] = img;
+	}
+	if (server->shell_spin_n > 0) {
+		wlr_log(WLR_INFO, "Vile: shell: loaded %d spin frames",
+			server->shell_spin_n);
+	}
+}
+
+static void vile_shell_dock_launch_start(struct vile_server *server,
+		int app) {
+	if (!vile_anim_enabled()) {
+		return; /* VILE_ANIM_OFF=1: no jump, the app just opens. */
+	}
+	if (app < 0 || app >= DOCK_APP_COUNT) {
+		return;
+	}
+	if (server->dock_launch_ms[app] != 0) {
+		return; /* Already launching — a second click must not
+			 * re-spawn or restart the bounce. */
+	}
+	vile_shell_load_spin_frames(server);
+	server->dock_launch_ms[app] = vile_anim_now_ms();
+	wlr_log(WLR_INFO, "Vile: dock: launch jump start '%s'",
+		vile_dock_app_names[app]);
+	vile_schedule_frames(server);
+}
+
+/* Has the launched app's window appeared yet? Same title matching
+ * as the 1s dock refresh, plus the wizard's "Vile Setup". */
+static bool vile_dock_launch_appeared(struct vile_server *server,
+		int app) {
+	struct vile_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (app == DOCK_FILES) {
+			if (t->app_files) {
+				return true;
+			}
+			continue;
+		}
+		const char *title = t->xdg_toplevel->title;
+		if (!title) {
+			continue;
+		}
+		switch (app) {
+		case DOCK_FOOT:
+			if (strncasecmp(title, "foot", 4) == 0) {
+				return true;
+			}
+			break;
+		case DOCK_SETTINGS:
+			if (strncasecmp(title, "Settings", 8) == 0) {
+				return true;
+			}
+			break;
+		case DOCK_SCREENFIT:
+			if (strncasecmp(title, "ScreenFit", 9) == 0) {
+				return true;
+			}
+			break;
+		case DOCK_SETUP:
+			if (strncasecmp(title, "Vile Setup", 10) == 0) {
+				return true;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+	return false;
+}
+
+/* Dock activation (Nov 10, 2026 ~16:31 — slot-based): focus the
+ * app if it is already open, else spawn it. Setup opens the
+ * first-run wizard. */
+static void vile_shell_dock_activate_app(struct vile_server *server,
+		int app) {
+	/* Launch jump (0.5.6): a second click while the app is still
+	 * launching must not spawn a duplicate — just pop the icon.
+	 * (A window that already exists is focused by the checks
+	 * below, which run first.) */
+	if (server->dock_launch_ms[app] != 0) {
+		int slot = vile_dock_slot_of_app(server, app);
+		if (slot >= 0) {
+			vile_anim_dock_pop(server, slot);
+		}
+		return;
+	}
+	if (app == DOCK_FILES) {
 		struct vile_toplevel *f = vile_shell_find_files(server);
 		if (f) {
 			wlr_log(WLR_INFO, "Vile: dock: focus 'Files'");
@@ -4845,37 +6312,272 @@ static void vile_shell_dock_activate(struct vile_server *server,
 		}
 		wlr_log(WLR_INFO, "Vile: dock: open Files");
 		vile_spawn_files(server);
+		vile_shell_dock_launch_start(server, app);
 		return;
 	}
+	if (app == DOCK_SETUP) {
+		wlr_log(WLR_INFO, "Vile: dock: open Setup");
+		vile_spawn_setup();
+		vile_shell_dock_launch_start(server, app);
+		return;
+	}
+	const char *prefix = vile_dock_app_names[app];
 	struct vile_toplevel *t = vile_shell_find_app(server, prefix);
 	if (t) {
 		wlr_log(WLR_INFO, "Vile: dock: focus '%s'", prefix);
 		vile_focus_toplevel(server, t);
 		return;
 	}
-	if (strcmp(prefix, "foot") == 0) {
+	if (app == DOCK_FOOT) {
 		wlr_log(WLR_INFO, "Vile: dock: open foot");
 		vile_spawn("foot");
-	} else if (strcmp(prefix, "ScreenFit") == 0) {
+	} else if (app == DOCK_SCREENFIT) {
 		wlr_log(WLR_INFO, "Vile: dock: open ScreenFit");
 		vile_spawn_screenfit(server);
 	} else {
 		wlr_log(WLR_INFO, "Vile: dock: open Settings");
 		vile_spawn_settings(server);
 	}
+	vile_shell_dock_launch_start(server, app);
 }
 
-/* A click on the shell (bar / dock / system menu). Returns true if
- * the click was consumed here — the caller must then NOT change
- * window focus. Returns false when the click was outside the shell
- * (or closed the menu and landed on a window), so normal focus
- * handling runs. */
-static bool vile_shell_click(struct vile_server *server, double lx, double ly) {
+/* Unpin menu (Nov 10, 2026 ~16:31): a small card above the dock
+ * icon with one row, "Unpin". Positioned above the icon, clamped
+ * to the output. */
+#define VILE_UNPIN_W 200
+#define VILE_UNPIN_H 56
+static void vile_shell_render_unpin(struct vile_server *server) {
+	int W = VILE_UNPIN_W, H = VILE_UNPIN_H;
+	const struct vile_palette *P = vile_pal(server->theme_light);
+	cairo_surface_t *surf = cairo_image_surface_create(
+		CAIRO_FORMAT_ARGB32, W, H);
+	cairo_t *cr = cairo_create(surf);
+	/* Near-opaque card, same language as the system menu. */
+	cairo_set_source_rgba(cr, P->panel_rgb[0], P->panel_rgb[1],
+		P->panel_rgb[2], 0.97);
+	cairo_new_path(cr);
+	vile_rounded_rect(cr, 0.5, 0.5, W - 1, H - 1, 12);
+	cairo_fill(cr);
+	cairo_set_source_rgba(cr, P->edge[0], P->edge[1], P->edge[2], 0.12);
+	cairo_set_line_width(cr, 1);
+	cairo_new_path(cr);
+	vile_rounded_rect(cr, 0.5, 0.5, W - 1, H - 1, 12);
+	cairo_stroke(cr);
+	/* One row: "Unpin" + a small pin glyph, left-aligned. */
+	vile_draw_text_at(cr, "Inter 15", P->text[0], P->text[1], P->text[2],
+		16, 19, "Unpin");
+	cairo_destroy(cr);
+	vile_shell_set_buffer(server, server->shell_unpin_node,
+		&server->shell_unpin_buffer, surf, W, H);
+	cairo_surface_destroy(surf);
+}
+
+static void vile_shell_set_unpin(struct vile_server *server, bool open,
+		int slot) {
+	if (!server->shell_created) {
+		return;
+	}
+	if (open) {
+		if (slot < 0 || slot >= server->dock_n) {
+			return;
+		}
+		/* Close the system menu — the two menus never overlap. */
+		vile_shell_set_menu(server, false);
+		server->shell_unpin_open = true;
+		server->shell_unpin_slot = slot;
+		int cx = server->shell_dock_rects[slot].x
+			+ server->shell_dock_rects[slot].width / 2;
+		int mx = cx - VILE_UNPIN_W / 2;
+		if (mx < 8) {
+			mx = 8;
+		}
+		if (mx + VILE_UNPIN_W > server->shell_w - 8) {
+			mx = server->shell_w - 8 - VILE_UNPIN_W;
+		}
+		int my = server->shell_dock_y - 8 - VILE_UNPIN_H;
+		if (my < 0) {
+			my = 0;
+		}
+		server->shell_unpin_rect = (struct wlr_box){
+			.x = mx, .y = my, .width = VILE_UNPIN_W,
+			.height = VILE_UNPIN_H };
+		server->shell_unpin_row_rect = server->shell_unpin_rect;
+		vile_shell_render_unpin(server);
+		if (server->shell_unpin_node) {
+			wlr_scene_node_set_enabled(
+				&server->shell_unpin_node->node, true);
+			wlr_scene_node_set_position(
+				&server->shell_unpin_node->node, mx, my);
+			wlr_scene_node_raise_to_top(
+				&server->shell_unpin_node->node);
+		}
+		wlr_log(WLR_INFO, "Vile: shell: unpin menu open for '%s' "
+			"at (%d,%d) %dx%d row centre (%d,%d)",
+			vile_dock_app_names[server->dock_order[slot]],
+			mx, my, VILE_UNPIN_W, VILE_UNPIN_H,
+			mx + VILE_UNPIN_W / 2, my + VILE_UNPIN_H / 2);
+	} else {
+		server->shell_unpin_open = false;
+		server->shell_unpin_slot = -1;
+		if (server->shell_unpin_node) {
+			wlr_scene_node_set_enabled(
+				&server->shell_unpin_node->node, false);
+		}
+	}
+}
+
+/* Unpin a dock entry (Nov 10, 2026 ~16:31): remove it from the
+ * order and persist. Unpinning Setup marks it hidden (the marker
+ * file) so it stays gone even though setup is still incomplete. */
+static void vile_dock_unpin(struct vile_server *server, int slot) {
+	if (slot < 0 || slot >= server->dock_n) {
+		return;
+	}
+	int app = server->dock_order[slot];
+	if (app == DOCK_SETUP) {
+		server->dock_setup_shown = false;
+		const char *home = getenv("HOME");
+		if (home) {
+			char dir[1024];
+			snprintf(dir, sizeof(dir), "%s/.config", home);
+			mkdir(dir, 0755);
+			snprintf(dir, sizeof(dir), "%s/.config/vile", home);
+			mkdir(dir, 0755);
+			char path[1024];
+			if (vile_dock_config_path(path, sizeof(path),
+					"dock-setup-hidden")) {
+				FILE *f = fopen(path, "w");
+				if (f) {
+					fclose(f);
+				}
+			}
+		}
+		wlr_log(WLR_INFO, "Vile: dock: unpinned 'setup' (hidden)");
+	} else {
+		wlr_log(WLR_INFO, "Vile: dock: unpinned '%s'",
+			vile_dock_app_names[app]);
+	}
+	memmove(&server->dock_order[slot], &server->dock_order[slot + 1],
+		(server->dock_n - slot - 1) * sizeof(int));
+	server->dock_n--;
+	if (app != DOCK_SETUP) {
+		vile_dock_save(server);
+	}
+	vile_dock_layout(server);
+	vile_shell_render_dock(server);
+	vile_dock_log_centres(server);
+}
+
+/* Hold timer (400ms): a press held still on a dock icon becomes a
+ * reorder drag. If the pointer moved >12px before the timer fired,
+ * it was a drag-away, not a hold — no reorder. */
+static int vile_dock_hold_timer_cb(void *data) {
+	struct vile_server *server = data;
+	if (server->dock_press_slot < 0 || !server->dock_press_down
+			|| server->dock_reorder || server->dock_press_moved) {
+		return 0;
+	}
+	int slot = server->dock_press_slot;
+	server->dock_reorder = true;
+	server->dock_drag_slot = slot;
+	server->dock_drag_x = server->cursor->x;
+	wlr_log(WLR_INFO, "Vile: dock: reorder drag '%s' (slot %d)",
+		vile_dock_app_names[server->dock_order[slot]], slot);
+	vile_shell_render_dock(server);
+	vile_schedule_frames(server);
+	return 0;
+}
+
+/* Button release for a dock press / reorder drag. A reorder drops
+ * the app at the slot under the pointer (and persists); a quick
+ * click with no movement pops + activates the app; a drag-away
+ * (moved >12px, no reorder) does nothing. A HOLD with no movement
+ * is still a click: a press held past the 400ms hold timer becomes
+ * a reorder drag, but if it is released in the same slot without
+ * ever moving, it pops + activates — otherwise any slow click
+ * (a QEMU HMP click holds the button ~1s; a hesitant human click
+ * holds it too) would silently do nothing. That was the 0.5.4
+ * dock-click regression. */
+static void vile_dock_release(struct vile_server *server) {
+	if (server->dock_hold_timer) {
+		wl_event_source_timer_update(server->dock_hold_timer, 0);
+	}
+	server->dock_press_down = false;
+	if (server->dock_reorder) {
+		int from = server->dock_drag_slot;
+		int to = vile_dock_drop_slot(server, server->dock_drag_x);
+		int app = server->dock_order[from];
+		if (to != from) {
+			if (to > from) {
+				memmove(&server->dock_order[from],
+					&server->dock_order[from + 1],
+					(to - from) * sizeof(int));
+			} else {
+				memmove(&server->dock_order[to + 1],
+					&server->dock_order[to],
+					(from - to) * sizeof(int));
+			}
+			server->dock_order[to] = app;
+			vile_dock_save(server);
+			wlr_log(WLR_INFO, "Vile: dock: reorder '%s' %d -> %d",
+				vile_dock_app_names[app], from, to);
+		} else {
+			wlr_log(WLR_INFO, "Vile: dock: reorder '%s' dropped "
+				"in place (slot %d)",
+				vile_dock_app_names[app], from);
+			/* Hold with no movement: still a click. A real
+			 * drag-away moved >12px, so dock_press_moved
+			 * tells the two apart. */
+			if (!server->dock_press_moved) {
+				vile_anim_dock_pop(server, from);
+				vile_shell_dock_activate_app(server, app);
+			}
+		}
+		server->dock_reorder = false;
+		server->dock_drag_slot = -1;
+		server->dock_press_slot = -1;
+		vile_dock_layout(server);
+		vile_shell_render_dock(server);
+		vile_dock_log_centres(server);
+		return;
+	}
+	if (server->dock_press_slot >= 0) {
+		int slot = server->dock_press_slot;
+		server->dock_press_slot = -1;
+		if (!server->dock_press_moved) {
+			/* Quick click: pop + activate. */
+			vile_anim_dock_pop(server, slot);
+			vile_shell_dock_activate_app(server,
+				server->dock_order[slot]);
+		}
+		/* A drag-away (moved >12px, no reorder): nothing. */
+	}
+}
+
+static bool vile_shell_click(struct vile_server *server, double lx,
+		double ly, uint32_t button) {
 	if (!server->shell_created || server->locked) {
 		return false;
 	}
 	int x = (int)lx, y = (int)ly;
-	struct wlr_box *b;
+	/* The unpin menu is topmost when open: its row unpins, a
+	 * click elsewhere on it just closes it, a click outside
+	 * closes it and falls through to the bar/dock/window
+	 * handling below. */
+	if (server->shell_unpin_open) {
+		if (vile_box_contains(&server->shell_unpin_rect, x, y)) {
+			if (vile_box_contains(&server->shell_unpin_row_rect,
+					x, y)) {
+				int slot = server->shell_unpin_slot;
+				vile_shell_set_unpin(server, false, -1);
+				vile_dock_unpin(server, slot);
+				return true;
+			}
+			vile_shell_set_unpin(server, false, -1);
+			return true;
+		}
+		vile_shell_set_unpin(server, false, -1);
+	}
 	/* The menu panel is topmost: its rows act first. */
 	if (server->shell_menu_open) {
 		if (vile_box_contains(&server->shell_menu_rect, x, y)) {
@@ -4897,6 +6599,16 @@ static bool vile_shell_click(struct vile_server *server, double lx, double ly) {
 				vile_spawn("systemctl poweroff");
 				return true;
 			}
+			if (vile_box_contains(&server->shell_menu_logout_rect, x, y)) {
+				/* Log Out: exit the compositor cleanly.
+				 * From a LightDM session this returns to
+				 * the greeter; from a text console it
+				 * returns to the login prompt. */
+				vile_shell_set_menu(server, false);
+				wlr_log(WLR_INFO, "Vile: shell menu: Log Out clicked");
+				wl_display_terminate(server->display);
+				return true;
+			}
 			/* Any other row (Wi-Fi / Volume / Battery) is
 			 * informational only — close the menu, change
 			 * nothing. */
@@ -4912,13 +6624,11 @@ static bool vile_shell_click(struct vile_server *server, double lx, double ly) {
 		}
 		vile_shell_set_menu(server, false);
 	}
-	/* Bottom bar (y = shell_h - 32 .. shell_h - 1). */
+	/* Bottom bar (y = shell_h - 32 .. shell_h - 1). The left
+	 * corner is empty now (no V tile, no wordmark) — the only
+	 * action on the bar is the status pill, which opens the
+	 * system menu. */
 	if (y >= server->shell_h - VILE_BAR_H && y < server->shell_h) {
-		if (vile_box_contains(&server->shell_logo_rect, x, y)) {
-			wlr_log(WLR_INFO, "Vile: shell: Vile logo clicked -> Settings");
-			vile_spawn_settings(server);
-			return true;
-		}
 		if (vile_box_contains(&server->shell_status_rect, x, y)) {
 			wlr_log(WLR_INFO, "Vile: shell: status cluster clicked -> menu");
 			vile_shell_set_menu(server, true);
@@ -4928,30 +6638,31 @@ static bool vile_shell_click(struct vile_server *server, double lx, double ly) {
 		 * bar is shell territory, so do not clear window focus. */
 		return true;
 	}
-	/* Dock pill. */
+	/* Dock (transparent, Nov 10, 2026 ~16:31): a press on an icon
+	 * ARMS the slot — it does not activate yet. A quick release
+	 * pops + activates; a 400ms hold starts a reorder drag;
+	 * a right-click opens the Unpin menu. This is what keeps a
+	 * hold-drag from fighting a click. */
 	if (vile_box_contains(&server->shell_dock_rect, x, y)) {
-		if (vile_box_contains(&server->shell_dock_foot_rect, x, y)) {
-			/* Piece 7: small pop on click. */
-			vile_anim_dock_pop(server, 0);
-			vile_shell_dock_activate(server, "foot");
+		int slot = vile_dock_slot_at(server, x, y);
+		if (slot >= 0) {
+			if (button == BTN_RIGHT) {
+				vile_shell_set_unpin(server, true, slot);
+				return true;
+			}
+			server->dock_press_slot = slot;
+			server->dock_press_ms = vile_anim_now_ms();
+			server->dock_press_x = lx;
+			server->dock_press_y = ly;
+			server->dock_press_moved = false;
+			server->dock_press_down = true;
+			if (server->dock_hold_timer) {
+				wl_event_source_timer_update(
+					server->dock_hold_timer, 400);
+			}
 			return true;
 		}
-		if (vile_box_contains(&server->shell_dock_settings_rect, x, y)) {
-			vile_anim_dock_pop(server, 1);
-			vile_shell_dock_activate(server, "Settings");
-			return true;
-		}
-		if (vile_box_contains(&server->shell_dock_screenfit_rect, x, y)) {
-			vile_anim_dock_pop(server, 2);
-			vile_shell_dock_activate(server, "ScreenFit");
-			return true;
-		}
-		if (vile_box_contains(&server->shell_dock_files_rect, x, y)) {
-			vile_anim_dock_pop(server, 3);
-			vile_shell_dock_activate(server, "Files");
-			return true;
-		}
-		/* Pill background: consume, no focus change. */
+		/* Between icons: consume, no focus change. */
 		return true;
 	}
 	return false;
@@ -5187,6 +6898,65 @@ static int vile_quit_timer(void *data) {
 	return 0;
 }
 
+/* Vile cursor theme (0.5.6 — Adnan, Nov 10 ~22:52): the purple
+ * arrow lives in the "vile" XCursor theme (assets/cursor-theme/vile,
+ * installed to /usr/share/icons/vile). wlroots' manager falls back
+ * to its built-in white arrow SILENTLY when a theme is missing, so
+ * check the file exists first — that way the fallback is explicit
+ * and logged, not silent. Search order mirrors wlroots' xcursor.c
+ * (XCURSOR_PATH, then ~/.icons, ~/.local/share/icons,
+ * /usr/share/icons). */
+static bool vile_cursor_theme_available(void) {
+	char path[1024];
+	const char *xc = getenv("XCURSOR_PATH");
+	if (xc && *xc) {
+		/* wlroots' xcursor_library_path() returns XCURSOR_PATH
+		 * ALONE when it is set — the default dirs are NOT
+		 * searched. Mirror that exactly, or the fallback test
+		 * (XCURSOR_PATH at an empty dir) would still find the
+		 * /usr/share/icons theme and never fall back. */
+		const char *p = xc;
+		while (*p) {
+			const char *colon = strchr(p, ':');
+			size_t len = colon ? (size_t)(colon - p)
+				: strlen(p);
+			if (len > 0 && len < sizeof(path) - 32) {
+				snprintf(path, sizeof(path),
+					"%.*s/vile/cursors/default",
+					(int)len, p);
+				if (access(path, R_OK) == 0) {
+					return true;
+				}
+			}
+			if (!colon) {
+				break;
+			}
+			p = colon + 1;
+		}
+		return false;
+	}
+	const char *home = getenv("HOME");
+	const char *cands[] = {
+		"%s/.icons/vile/cursors/default",
+		"%s/.local/share/icons/vile/cursors/default",
+		"/usr/share/icons/vile/cursors/default",
+		NULL,
+	};
+	for (int i = 0; cands[i]; i++) {
+		if (cands[i][0] == '/') {
+			snprintf(path, sizeof(path), "%s", cands[i]);
+		} else if (home) {
+			snprintf(path, sizeof(path), cands[i], home);
+		} else {
+			continue;
+		}
+		if (access(path, R_OK) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static int vile_signal_handler(int signal_number, void *data) {
 	struct vile_server *server = data;
 	wlr_log(WLR_INFO, "Vile: signal %d received, exiting", signal_number);
@@ -5216,6 +6986,72 @@ static const char *vile_default_wallpaper(void) {
 		}
 	}
 	return "../wallpapers/vile-purple-arch.jpg";
+}
+
+/* Theme (0.5.4): ~/.config/vile/theme — plain text, "dark" or
+ * "light". Missing/unreadable/invalid means dark. VILE_THEME
+ * (test override) wins over the file, like VILE_WALLPAPER. */
+static bool vile_theme_path(char *buf, size_t len) {
+	const char *home = getenv("HOME");
+	if (!home) {
+		return false;
+	}
+	snprintf(buf, len, "%s/.config/vile/theme", home);
+	return true;
+}
+
+static bool vile_read_theme(void) {
+	const char *env = getenv("VILE_THEME");
+	if (env && *env) {
+		return strcmp(env, "light") == 0;
+	}
+	char path[1024];
+	if (!vile_theme_path(path, sizeof(path))) {
+		return false;
+	}
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		return false;
+	}
+	char buf[32];
+	bool light = false;
+	if (fgets(buf, sizeof(buf), f)) {
+		light = strncmp(buf, "light", 5) == 0;
+	}
+	fclose(f);
+	return light;
+}
+
+/* Apply a theme live: palette flag, letterbox colour, logo variant,
+ * lock background (if locked) + lock UI, shell re-render, borders.
+ * Called from the 1s shell timer when the theme file changes, and
+ * from main() at startup (flag only — nothing exists to re-render
+ * yet, so the early call is a no-op beyond the flag). */
+static void vile_apply_theme(struct vile_server *server, bool light) {
+	bool changed = (light != server->theme_light);
+	server->theme_light = light;
+	const struct vile_palette *p = vile_pal(server->theme_light);
+	if (server->bg_rect) {
+		const float bg[4] = { p->bg[0], p->bg[1], p->bg[2], 1.0f };
+		wlr_scene_rect_set_color(server->bg_rect, bg);
+	}
+	if (changed) {
+		if (server->locked) {
+			vile_lock_reload_bg(server);
+			vile_lock_render(server);
+		}
+	}
+	if (server->shell_created) {
+		vile_shell_render_bar(server);
+		vile_shell_render_dock(server);
+		if (server->shell_menu_open) {
+			vile_shell_render_menu(server);
+		}
+	}
+	/* Borders: the unfocused dim changes with the theme. */
+	vile_update_borders(server);
+	vile_schedule_frames(server);
+	wlr_log(WLR_INFO, "Vile: theme %s", light ? "light" : "dark");
 }
 
 /* Random default wallpaper (Nov 10, 2026 — Adnan: "make both
@@ -5391,6 +7227,18 @@ int main(int argc, char *argv[]) {
 		lock_user = pw ? pw->pw_name : "root";
 	}
 	server.lock_user = lock_user;
+	/* Theme (0.5.4): read before the wallpaper/logo/lock load, so
+	 * every first frame already uses the right palette. theme_mtime
+	 * seeds the watcher so the first timer tick doesn't re-apply. */
+	server.theme_light = vile_read_theme();
+	{
+		char tpath[1024];
+		if (vile_theme_path(tpath, sizeof(tpath))) {
+			struct stat tst;
+			server.theme_mtime = (stat(tpath, &tst) == 0) ?
+				tst.st_mtime : 0;
+		}
+	}
 	wl_list_init(&server.outputs);
 	wl_list_init(&server.toplevels);
 	wl_list_init(&server.keyboards);
@@ -5472,10 +7320,20 @@ int main(int argc, char *argv[]) {
 	 * not move by itself. We attach the output layout (so motion is
 	 * clamped to the screen), load the "default" arrow image, and
 	 * listen for the aggregate motion/button/axis/frame events it
-	 * re-emits from every pointer device. */
+	 * re-emits from every pointer device.
+	 * Vile cursor (0.5.6): the purple arrow theme, falling back to
+	 * the system default when the theme files are missing. */
 	server.cursor = wlr_cursor_create();
 	wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
-	server.cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+	if (vile_cursor_theme_available()) {
+		server.cursor_mgr = wlr_xcursor_manager_create("vile", 24);
+		wlr_log(WLR_INFO,
+			"Vile: cursor theme 'vile' (purple arrow)");
+	} else {
+		wlr_log(WLR_ERROR, "Vile: cursor theme 'vile' not found"
+			" — falling back to system default cursor");
+		server.cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+	}
 	if (!wlr_xcursor_manager_load(server.cursor_mgr, 1)) {
 		wlr_log(WLR_ERROR, "Vile: xcursor theme failed to load");
 	}
@@ -5516,15 +7374,13 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr, "Vile: wallpaper failed, refusing to run black\n");
 		return 1;
 	}
-	/* Arch logo overlay: centred over the wallpaper, under windows.
-	 * Failure is non-fatal — the desktop still works, just without
-	 * the logo. */
-	vile_load_logo(&server);
-	/* Live-reload baseline: remember what is on screen and the
-	 * hook file's mtime, so the 1-second watcher only fires when
-	 * Settings actually picks a different wallpaper. */
 	snprintf(server.wallpaper_current, sizeof(server.wallpaper_current),
 		"%s", wallpaper);
+	/* No logo overlay (Nov 10, 2026 ~16:31 — Adnan: no logo
+	 * stamped on any wallpaper; the overlay draw was deleted). */
+	/* Live-reload baseline: remember the hook file's mtime, so the
+	 * 1-second watcher only fires when Settings actually picks a
+	 * different wallpaper. */
 	char hook_path[1024];
 	if (vile_wallpaper_hook_path(hook_path, sizeof(hook_path))) {
 		struct stat st;
@@ -5583,6 +7439,11 @@ int main(int argc, char *argv[]) {
 	server.shell_timer = wl_event_loop_add_timer(loop,
 		vile_shell_timer, &server);
 	wl_event_source_timer_update(server.shell_timer, 1000);
+	/* Dock hold timer (Nov 10, 2026 ~16:31): a press held 400ms
+	 * on a dock icon becomes a reorder drag. Created disarmed
+	 * (no update call) — a dock press arms it for 400ms. */
+	server.dock_hold_timer = wl_event_loop_add_timer(loop,
+		vile_dock_hold_timer_cb, &server);
 	wl_event_loop_add_signal(loop, SIGINT, vile_signal_handler, &server);
 	wl_event_loop_add_signal(loop, SIGTERM, vile_signal_handler, &server);
 
@@ -5620,6 +7481,10 @@ int main(int argc, char *argv[]) {
 	}
 	if (server.shell_files_icon) {
 		cairo_surface_destroy(server.shell_files_icon);
+	}
+	/* Launch-jump spinner frames (0.5.6). */
+	for (int i = 0; i < server.shell_spin_n; i++) {
+		cairo_surface_destroy(server.shell_spin_frames[i]);
 	}
 	if (server.shell_bar_buffer) {
 		wlr_buffer_drop(server.shell_bar_buffer);

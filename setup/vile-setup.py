@@ -62,7 +62,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
 
-VERSION = "0.5.3"
+VERSION = "0.5.6"
 
 # ---- Shared code from Settings (imported, never copied) ------------
 # set_profile_picture / set_wallpaper / wallpaper thumbnails / CSS are
@@ -97,6 +97,11 @@ wallpapers_dir = _settings.wallpapers_dir
 wallpaper_thumb_pixbuf = _settings.wallpaper_thumb_pixbuf
 current_wallpaper_path = _settings.current_wallpaper_path
 avatar_preview_pixbuf = _settings.avatar_preview_pixbuf
+# Theme (0.5.4): same shared file as Settings and the compositor.
+read_theme = _settings.read_theme
+write_theme = _settings.write_theme
+theme_css = _settings.theme_css
+theme_preview_pixbuf = _settings.theme_preview_pixbuf
 
 # ---- Vile logo (real ribbon V, Adnan's own asset, Nov 10, 2026) ---
 # Welcome step hero mark. Same path pattern as the Settings import
@@ -181,7 +186,7 @@ def write_setup_done(name):
     os.makedirs(vile_dir(), exist_ok=True)
     try:
         with open(setup_done_path(), "w") as f:
-            f.write("vile-setup 0.5.3\n")
+            f.write("vile-setup 0.5.6\n")
             f.write("finished: %s\n" % datetime.datetime.now().isoformat())
             f.write("name: %s\n" % name)
         return True
@@ -220,7 +225,8 @@ def save_timezone(tz):
 
 
 class SetupWindow(Gtk.Window):
-    STEPS = ["Welcome", "You", "Wallpaper", "Apps", "Timezone", "Done"]
+    STEPS = ["Welcome", "You", "Wallpaper", "Theme", "Apps", "Timezone",
+             "Done"]
 
     def __init__(self, start_step=0, dry_run=False):
         super().__init__(title="Vile Setup")
@@ -236,15 +242,20 @@ class SetupWindow(Gtk.Window):
             "name": getpass.getuser(),
             "picture_set": False,
             "wallpaper": current_wallpaper_path(),
+            # Theme (0.5.4): default selection = the current theme
+            # (dark on a first install — the file does not exist yet).
+            "theme": "light" if read_theme() else "dark",
             "apps": {pkg: default for (_n, pkg, _s, _d, default) in APPS},
             "timezone": DEFAULT_TIMEZONE,
         }
         self._app_checks = {}  # pkg -> Gtk.CheckButton (None = included)
 
-        css = Gtk.CssProvider()
-        css.load_from_data(CSS.encode())
+        # Theme-aware CSS (0.5.4): the provider is kept so picking
+        # a theme on the Theme step restyles the wizard itself live.
+        self._css = Gtk.CssProvider()
+        self._css.load_from_data(theme_css(read_theme()).encode())
         Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), css,
+            Gdk.Screen.get_default(), self._css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -281,6 +292,7 @@ class SetupWindow(Gtk.Window):
         self._build_welcome()
         self._build_name()
         self._build_wallpaper()
+        self._build_theme()
         self._build_apps()
         self._build_timezone()
         self._build_done()
@@ -302,7 +314,7 @@ class SetupWindow(Gtk.Window):
         self.continue_btn.connect("clicked", self.on_continue)
         nav.pack_start(self.continue_btn, False, False, 0)
 
-        self.show_step(max(0, min(start_step, 5)))
+        self.show_step(max(0, min(start_step, 6)))
 
     # ---- Step builders ----------------------------------------------
 
@@ -408,6 +420,73 @@ class SetupWindow(Gtk.Window):
             self.wp_rows[path] = (row, cur_lbl)
         self._refresh_wallpaper_selection()
         self.stack.add_named(box, "wallpaper")
+
+    def _build_theme(self):
+        # Theme step (0.5.4): two big choice cards, Dark / Light,
+        # each with a small preview — same row pattern as the
+        # Wallpaper step. Clicking one writes the theme file
+        # immediately AND restyles this wizard live, so the choice
+        # is visible before Continue. Default = current theme.
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self._step_title(box, "Dark or light?",
+                         "The whole system follows — desktop, lock "
+                         "screen and apps. Change it any time in "
+                         "Settings.")
+        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        frame.get_style_context().add_class("frame")
+        box.pack_start(frame, False, False, 0)
+        self.theme_rows = {}
+        for light, name, desc in (
+                (False, "Dark",
+                 "Dark surfaces, light text — the Vile look"),
+                (True, "Light",
+                 "Lavender-white surfaces, dark text")):
+            row = Gtk.Button()
+            row.get_style_context().add_class("wallpaper-row")
+            row.connect("clicked", self.on_theme_clicked, light)
+            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                           spacing=16)
+            row.add(hbox)
+            thumb = Gtk.Image.new_from_pixbuf(
+                theme_preview_pixbuf(light))
+            hbox.pack_start(thumb, False, False, 0)
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            hbox.pack_start(text, True, True, 0)
+            name_lbl = Gtk.Label(label=name)
+            name_lbl.get_style_context().add_class("wp-name")
+            name_lbl.set_halign(Gtk.Align.START)
+            text.pack_start(name_lbl, False, False, 0)
+            dims_lbl = Gtk.Label(label=desc)
+            dims_lbl.get_style_context().add_class("wp-dims")
+            dims_lbl.set_halign(Gtk.Align.START)
+            text.pack_start(dims_lbl, False, False, 0)
+            cur_lbl = Gtk.Label(label="✓ Current")
+            cur_lbl.get_style_context().add_class("current-tag")
+            cur_lbl.set_no_show_all(True)
+            hbox.pack_start(cur_lbl, False, False, 0)
+            frame.pack_start(row, False, False, 0)
+            self.theme_rows[light] = (row, cur_lbl)
+        self._refresh_theme_selection()
+        self.stack.add_named(box, "theme")
+
+    def _refresh_theme_selection(self):
+        cur_light = (self.data["theme"] == "light")
+        for light, (row, tag) in self.theme_rows.items():
+            selected = (light == cur_light)
+            tag.set_visible(selected)
+            ctx = row.get_style_context()
+            if selected:
+                ctx.add_class("selected")
+            else:
+                ctx.remove_class("selected")
+
+    def on_theme_clicked(self, _button, light):
+        self.data["theme"] = "light" if light else "dark"
+        write_theme(light)
+        # Restyle the wizard itself live — the choice is visible
+        # on this very step.
+        self._css.load_from_data(theme_css(light).encode())
+        self._refresh_theme_selection()
 
     def _build_apps(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
@@ -520,14 +599,14 @@ class SetupWindow(Gtk.Window):
 
     def show_step(self, n):
         self.step = n
-        names = ["welcome", "name", "wallpaper", "apps", "timezone",
-                 "done"]
+        names = ["welcome", "name", "wallpaper", "theme", "apps",
+                 "timezone", "done"]
         self.stack.set_visible_child_name(names[n])
         for i, dot in enumerate(self.dots):
             dot.set_text("●" if i <= n else "○")
         self.back_btn.set_sensitive(n > 0)
-        self.skip_btn.set_visible(n < 5)
-        if n == 5:
+        self.skip_btn.set_visible(n < 6)
+        if n == 6:
             self._refresh_summary()
             self.continue_btn.set_label("Finish")
         else:
@@ -547,10 +626,10 @@ class SetupWindow(Gtk.Window):
         if self._on_installing:
             self.on_install_clicked(_button)
             return
-        if self.step < 5:
+        if self.step < 6:
             self._save_current_step()
             self.show_step(self.step + 1)
-        elif self.step == 5:
+        elif self.step == 6:
             self._save_current_step()
             self._finish()
 
@@ -570,7 +649,12 @@ class SetupWindow(Gtk.Window):
         elif self.step == 2:
             if self.data["wallpaper"]:
                 set_wallpaper(self.data["wallpaper"])
-        elif self.step == 4:
+        elif self.step == 3:
+            # Theme: already written on click (and the wizard
+            # restyled live) — re-write here so Continue alone
+            # also saves it if the click handler ever changes.
+            write_theme(self.data["theme"] == "light")
+        elif self.step == 5:
             tz = self.tz_combo.get_active_text() or ""
             tz = tz.strip()
             if not tz:
@@ -591,6 +675,7 @@ class SetupWindow(Gtk.Window):
             "Picture: %s" % ("set ✓" if self.data["picture_set"]
                              else "not set (purple V)"),
             f"Wallpaper: {wp_name}",
+            f"Theme: {self.data['theme'].capitalize()}",
             "Apps: %s" % (", ".join(apps) if apps else "none"),
             f"Timezone: {self.data['timezone']}",
         ]
@@ -827,16 +912,16 @@ def main():
                         help="show install commands instead of running "
                              "them (no pacman on this VM)")
     parser.add_argument("--step", type=int, default=0,
-                        help="open on step N (0 Welcome .. 5 Done, "
-                             "6 Installing)")
+                        help="open on step N (0 Welcome .. 6 Done, "
+                             "7 Installing)")
     args = parser.parse_args()
     dry_run = args.dry_run or bool(os.environ.get("VILE_SETUP_DRY_RUN"))
 
     Gtk.Settings.get_default().set_property(
-        "gtk-application-prefer-dark-theme", True)
+        "gtk-application-prefer-dark-theme", not read_theme())
 
     win = SetupWindow(start_step=args.step, dry_run=dry_run)
-    if args.step == 6:
+    if args.step == 7:
         # Test path: jump straight to the installing screen with the
         # default selections (Finish already implied — marker written).
         write_setup_done(getpass.getuser())
@@ -850,11 +935,26 @@ def main():
             win.pw_entry.set_visible(False)
     win.connect("destroy", Gtk.main_quit)
     win.show_all()
+    if args.step:
+        # Re-assert the initial step AFTER the window is shown.
+        # set_visible_child_name before show does not stick: the
+        # stack shows its first child even though show_step ran
+        # (proved: --step 3 showed Theme dots over the Welcome
+        # page, twice — disabling the slide transition did not
+        # fix it). Once realized, the same call works.
+        win.show_step(max(0, min(args.step, 6)))
     # The Continue button starts as the window default, so Enter
     # advances through the wizard (the harness drives it that way
     # only where no text entry has focus; elsewhere it clicks).
     win.continue_btn.set_can_default(True)
     win.continue_btn.grab_default()
+    # Enter-race fix (Nov 11): GTK gives the window's initial
+    # focus to the first SENSITIVE focusable widget — at step 0
+    # Back is insensitive, so focus landed on "Skip setup" and
+    # one Enter fired on_skip (setup-done + destroy), skipping
+    # the whole wizard. Focus Continue explicitly so Enter hits
+    # Continue (one step) instead.
+    win.continue_btn.grab_focus()
     Gtk.main()
 
 
